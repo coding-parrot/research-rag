@@ -1,0 +1,67 @@
+# Example configuration. Copy to config.yaml and pass with `rag -c config.yaml ...`.
+# Every value shown is the default; delete anything you do not want to override.
+# Secrets are NOT config: they come from the environment (.env), never this file.
+
+ocr:
+  engine: surya          # surya | fake (fake replays cached fixtures, for tests)
+  dpi: 150
+  batch_size: 4          # raise on a bigger GPU; lower if MPS runs out of memory
+  detect_tables: true
+  cache: true            # never turn this off; Surya costs minutes per paper
+
+headers:
+  use_outline: true      # PDF bookmarks, the highest-precision signal
+  use_layout: true       # Surya SECTION_HEADER regions
+  use_regex: true        # numbered-heading fallback
+  use_font: false        # noisy on arXiv, last resort
+  min_confidence: 0.5
+
+chunk:
+  max_depth: 1           # 1 = "3. Experiments" is one chunk, 3.1/3.2 stay inside
+  max_chunk_tokens: 512  # sections above this split into parts
+  part_overlap_tokens: 64
+  min_chunk_chars: 200   # sections below this merge forward
+  repeat_header_in_parts: true
+
+embed:
+  provider: sentence-transformers
+  model: sentence-transformers/all-MiniLM-L6-v2
+  dimension: 384         # must match the model; checked at load time
+  normalize: true
+
+index:
+  store: faiss           # faiss | inmemory
+  bm25: true             # lexical half of hybrid retrieval
+
+retrieve:
+  strategy: hybrid       # vanilla | multi_query | hyde | hybrid
+  top_k: 4
+  fetch_k: 20
+  rerank: true
+  reranker: cross-encoder  # cross-encoder (local, free) | cohere (hosted) | none
+  reranker_model: BAAI/bge-reranker-base
+  max_per_doc: 2         # one paper can never fill the whole context
+
+generate:
+  provider: anthropic    # anthropic | ollama | fake
+  model: claude-opus-5
+  effort: high
+  max_tokens: 4096
+  ollama_model: gemma2:2b   # used when provider = ollama; free, local, no key
+  max_regenerations: 1   # one retry on citation failure, then a typed refusal
+
+guardrails:
+  max_query_chars: 500
+  scope_threshold: 0.18  # cosine vs corpus centroid; below = out of scope
+  relevance_floor: 0.25  # best dense score below this = refuse before the model
+  require_citations: true
+  verify_quotes: true    # quotes must appear verbatim in their cited chunk
+
+eval:
+  judge_provider: anthropic
+  judge_model: claude-opus-5
+  min_recall_at_k: 0.75  # CI gates; raise as the system improves
+  min_mrr: 0.60
+  min_citation_validity: 0.95
+  min_header_boundary_f1: 0.85
+  max_false_refusal_rate: 0.10
