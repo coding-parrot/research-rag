@@ -1,75 +1,20 @@
 [project]
 name = "research-rag"
-version = "0.1.0"
-description = "Section-aware RAG over the InterviewReady AI-engineering research library"
+version = "1.0.0"
+description = "A RAG chatbot over ML papers, written to be read"
 requires-python = ">=3.12"
 dependencies = [
-    "pydantic>=2.7",
-    "pydantic-settings>=2.3",
-    "pyyaml>=6.0",
-    "httpx>=0.27",
-    "numpy>=1.26",
-    "typer>=0.12",
-    "rich>=13.7",
-    # Pure-python, numpy-only. Core because hybrid retrieval is the default.
-    "rank-bm25>=0.2.2",
-    # HTML case-study extraction (blogs in the corpus). Pure-python.
-    "beautifulsoup4>=4.12",
+    "pypdfium2",
+    "sentence-transformers",
+    "faiss-cpu",
+    "openai",
+    "fastapi",
+    "uvicorn",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
-# Heavy model deps. Unit tests never need these.
-# surya pinned to a tested minor: its Python API moves between minors.
-# pypdfium2 follows surya's own requirement (>=5.10.1,<6); read_outline targets the v5 API.
-ingest = ["surya-ocr>=0.22,<0.23", "pypdfium2>=5.10.1,<6"]
-embed = ["sentence-transformers>=3.0"]
-index = ["faiss-cpu>=1.8"]
-generate = ["anthropic>=0.40"]
-rerank = ["cohere>=5.5"]
-api = ["fastapi>=0.111", "uvicorn>=0.30"]
-dev = [
-    "pytest>=8.2",
-    "pytest-cov>=5.0",
-    "hypothesis>=6.100",
-    "ruff>=0.5",
-    "mypy>=1.10",
-]
-all = [
-    "research-rag[ingest,embed,index,generate,rerank,api,dev]",
-]
-
-[project.scripts]
-rag = "rag.cli:app"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/rag"]
+dev = ["pytest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
-markers = [
-    "integration: needs network or model weights (deselect with -m 'not integration')",
-    "llm: spends API tokens (deselect with -m 'not llm')",
-]
-
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]
-
-[tool.mypy]
-python_version = "3.12"
-strict = true
-warn_unreachable = true
-ignore_missing_imports = true
-files = ["src/rag"]
-
-[tool.coverage.run]
-source = ["src/rag"]
