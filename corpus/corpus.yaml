@@ -127,3 +127,24 @@ papers:
   url: https://arxiv.org/pdf/2402.09171
   license: arxiv-nonexclusive
   sha256: 8334ccf3de0555abd0153d01f684f68a76d4bc96b07f0dd07b78a821ae70a45e
+- id: attention
+  title: Attention Is All You Need
+  arxiv_id: '1706.03762'
+  topic: architecture
+  url: https://arxiv.org/pdf/1706.03762
+  license: arxiv-nonexclusive
+  sha256: bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697
+- id: mqa
+  title: 'Fast Transformer Decoding: One Write-Head is All You Need'
+  arxiv_id: '1911.02150'
+  topic: inference
+  url: https://arxiv.org/pdf/1911.02150
+  license: arxiv-nonexclusive
+  sha256: 3250947d7be32f1a15531ab3062134edd431b9cf79e669d324ab5cbddd9a2094
+- id: paged_attention
+  title: Efficient Memory Management for Large Language Model Serving with PagedAttention
+  arxiv_id: '2309.06180'
+  topic: inference
+  url: https://arxiv.org/pdf/2309.06180
+  license: arxiv-nonexclusive
+  sha256: 55b3b324d779a67c59dac2519445e3b07c14e6ff5c656fadb47a3d7b5997469e
