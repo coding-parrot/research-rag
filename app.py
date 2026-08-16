@@ -68,3 +68,10 @@ f.onsubmit = async (e) => {
 @app.get("/", response_class=HTMLResponse)
 def home() -> str:
     return PAGE
+
+
+if __name__ == "__main__":
+    # So "Run app.py" works directly in an IDE - no terminal needed.
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8477)
