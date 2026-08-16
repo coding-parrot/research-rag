@@ -51,6 +51,14 @@ def preview(text: str, limit: int = PREVIEW_CHARS) -> str:
 class JsonFormatter(logging.Formatter):
     """One JSON object per line, with the trace id attached automatically."""
 
+    # Core keys the formatter itself owns. Caller-supplied structured fields must
+    # never overwrite them: a field named "msg" or "level" would rewrite the
+    # line's message or severity and corrupt log-based alerting. Reserved keys
+    # win; the colliding field keeps its data under a "fields_" prefix. The set
+    # is fixed (not "keys currently in payload") because trace_id is absent when
+    # no trace is bound, and a spoofed trace_id must not slip through that gap.
+    _RESERVED = frozenset({"ts", "level", "logger", "msg", "trace_id", "exc"})
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)),
@@ -65,7 +73,8 @@ class JsonFormatter(logging.Formatter):
         # Anything passed via logger.info("...", extra={"fields": {...}})
         fields = getattr(record, "fields", None)
         if isinstance(fields, dict):
-            payload.update(fields)
+            for key, value in fields.items():
+                payload[f"fields_{key}" if key in self._RESERVED else key] = value
         return json.dumps(payload, default=str)
 
 
@@ -99,10 +108,27 @@ class _FieldAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
 
 @contextmanager
 def timed(log: logging.LoggerAdapter[logging.Logger], stage: str, **fields: Any) -> Iterator[None]:
-    """Log the wall-clock duration of a stage."""
+    """Log the wall-clock duration of a stage, marking failures as failures.
+
+    A crashed stage must not emit the same "done" line as a completed one:
+    anyone grepping logs for stage completion would count the crash as a finish.
+    The exception is re-raised untouched; only the log line differs. BaseException
+    is deliberate, so even KeyboardInterrupt cannot produce a false "done".
+    """
     start = time.perf_counter()
     try:
         yield
-    finally:
+    except BaseException as exc:
         elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
-        log.info(f"{stage} done", fields={"stage": stage, "elapsed_ms": elapsed_ms, **fields})
+        log.error(
+            f"{stage} failed",
+            fields={
+                "stage": stage,
+                "elapsed_ms": elapsed_ms,
+                "error": type(exc).__name__,
+                **fields,
+            },
+        )
+        raise
+    elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
+    log.info(f"{stage} done", fields={"stage": stage, "elapsed_ms": elapsed_ms, **fields})

@@ -16,6 +16,8 @@ import yaml
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from rag.errors import ConfigError
+
 RepoRoot = Path(__file__).resolve().parents[2]
 
 
@@ -161,8 +163,10 @@ class GuardrailConfig(BaseModel):
     scope_threshold: float = Field(default=0.18, ge=-1.0, le=1.0)
     # Best retrieved score below which we refuse instead of calling the model.
     relevance_floor: float = Field(default=0.25, ge=-1.0, le=1.0)
-    # Chunks whose text is this similar to a higher-ranked chunk are dropped.
-    dedup_threshold: float = Field(default=0.97, ge=0.0, le=1.0)
+    # Chunks whose containment coefficient (shared shingles / smaller chunk) against
+    # a higher-ranked chunk reaches this are dropped as near-duplicates. 0.8 fires on
+    # split-part overlap and verbatim quoting without collapsing merely-similar text.
+    dedup_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     scan_retrieved_for_injection: bool = True
     require_citations: bool = True
     # Quotes must appear verbatim in their cited chunk. Turning this off is a footgun.
@@ -215,13 +219,28 @@ class Config(BaseModel):
         """Load from YAML, or return defaults when no file is given."""
         if path is None:
             return cls()
-        data = yaml.safe_load(Path(path).read_text()) or {}
+        # Read-then-parse, each wrapped: a typo'd --config path or broken YAML
+        # must surface as the package's typed ConfigError naming the path, not a
+        # bare FileNotFoundError traceback. Catching OSError on the read (rather
+        # than pre-checking existence) also covers permission and is-a-directory
+        # errors without a TOCTOU race.
+        try:
+            text = Path(path).read_text()
+        except OSError as exc:
+            raise ConfigError(f"cannot read config {path}: {exc}") from exc
+        try:
+            data = yaml.safe_load(text) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"config {path} is not valid YAML: {exc}") from exc
         return cls.model_validate(data)
 
     def hash(self) -> str:
-        """Stable hash of the config, for run manifests and OCR cache keys.
+        """Stable hash of the config, for run manifests only.
 
         Paths are excluded: moving the data directory does not invalidate results.
+        The OCR disk-cache key is NOT derived from this hash; it is computed
+        separately from OcrConfig in ingest/ocr/cached.py, so retrieval or
+        generation changes never re-OCR the corpus.
         """
         payload = self.model_dump(mode="json", exclude={"paths"})
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -233,7 +252,12 @@ class Config(BaseModel):
         Changing retrieval or generation settings must not force a re-ingest.
         """
         payload = {
-            "ocr": self.ocr.model_dump(mode="json"),
+            # batch_size is throughput-only and cache merely gates disk-cache
+            # lookup; neither changes OCR output, so neither may change this
+            # hash. Keep this exclusion set in lockstep with the OCR cache key
+            # (_cache_key in ingest/ocr/cached.py), which excludes the same keys
+            # for the same reason.
+            "ocr": self.ocr.model_dump(mode="json", exclude={"cache", "batch_size"}),
             "headers": self.headers.model_dump(mode="json"),
             "chunk": self.chunk.model_dump(mode="json"),
         }

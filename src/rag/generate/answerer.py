@@ -49,6 +49,13 @@ _REFUSAL_MARKERS = (
     "do not discuss",
 )
 
+# A genuine refusal per ANSWER_TEMPLATE is "a brief statement that the indexed
+# papers do not cover it", so it leads with the marker and stays short. A
+# substantive answer that merely contains a marker phrase somewhere must fall
+# through to citation validation and its retry instead of being misfiled here.
+_REFUSAL_MARKER_WINDOW = 160  # the marker must appear within this many chars
+_REFUSAL_MAX_CHARS = 200  # and the whole answer must be this short
+
 
 class Answerer:
     def __init__(self, client: LlmClient, guard: OutputGuard, config: GenerateConfig) -> None:
@@ -70,6 +77,10 @@ class Answerer:
 
         attempts = 1 + max(0, self._config.max_regenerations)
         last_verdict: OutputVerdict | None = None
+        # An allowed verdict whose citations were partially dropped. Kept so a retry
+        # that fails outright still ships the earlier partial answer instead of a
+        # refusal; the MODIFY decisions record what was dropped.
+        partial: OutputVerdict | None = None
 
         for attempt in range(attempts):
             try:
@@ -103,9 +114,34 @@ class Answerer:
                 )
                 return self._refusal(AnswerStatus.BLOCKED_OUTPUT, retrieved, decisions, usage)
 
+            if response.truncated:
+                # A body cut at max_tokens is not a parseable final answer, and a
+                # retry at the same limit would truncate again. Treated like an
+                # LlmError: record the real cause, refuse without burning the
+                # citation retry on a doomed regeneration.
+                log.error(
+                    "generation truncated at max_tokens",
+                    fields={"attempt": attempt, "max_tokens": self._config.max_tokens},
+                )
+                decisions.append(
+                    Decision.deny(
+                        "generate.truncated",
+                        "The model ran out of output tokens before finishing its answer.",
+                        evidence=f"max_tokens={self._config.max_tokens}",
+                    )
+                )
+                return self._refusal(
+                    AnswerStatus.INSUFFICIENT_EVIDENCE, retrieved, decisions, usage
+                )
+
             text, raw_citations = _parse(response.parsed, response.text)
 
             if _is_model_refusal(text, raw_citations):
+                # Refusal prose is still model-authored text built over retrieved
+                # chunks, so it gets the same redaction the OK path gets.
+                text, redaction = self._guard.redact(text)
+                if redaction is not None:
+                    decisions.append(redaction)
                 decisions.append(Decision.allow("generate.no_answer", "model reported no coverage"))
                 return Answer(
                     status=AnswerStatus.INSUFFICIENT_EVIDENCE,
@@ -120,30 +156,44 @@ class Answerer:
             decisions.extend(verdict.decisions)
             last_verdict = verdict
 
+            final = attempt + 1 >= attempts
             if verdict.allowed:
-                if attempt > 0:
-                    log.info("regeneration recovered a valid answer", fields={"attempt": attempt})
-                return Answer(
-                    status=AnswerStatus.OK,
-                    text=verdict.text,
-                    citations=verdict.citations,
-                    retrieved=tuple(retrieved),
-                    decisions=tuple(decisions),
-                    usage=usage,
-                    trace_id=current_trace_id(),
-                )
+                if not verdict.should_retry or final:
+                    # Clean, or the final attempt: dropped citations (if any) are
+                    # on record as MODIFY decisions and the survivors ship.
+                    if attempt > 0:
+                        log.info(
+                            "regeneration recovered a valid answer", fields={"attempt": attempt}
+                        )
+                    return self._ok(verdict, retrieved, decisions, usage)
+                # Some citations were dropped; the claims they supported would ship
+                # unverified. Worth one regeneration, like any citation failure.
+                partial = verdict
 
-            if not verdict.should_retry or attempt + 1 >= attempts:
+            if not verdict.should_retry or final:
                 break
 
             denial = verdict.denial
-            reason = denial.reason if denial else "citation validation failed"
+            if denial is not None:
+                reason = denial.reason
+            elif verdict.dropped_citations:
+                reason = "Some citations failed validation and were dropped: " + " ".join(
+                    d.reason for d in verdict.dropped_citations
+                )
+            else:
+                reason = "citation validation failed"
             log.warning(
                 "citation validation failed, regenerating",
                 fields={"attempt": attempt, "reason": reason},
             )
             prompt = build_answer_prompt(question, retrieved, quarantined=quarantined)
             prompt += REGENERATION_SUFFIX.format(reason=reason)
+
+        if partial is not None:
+            # The retry did worse than the partial answer it was meant to improve
+            # on; ship the partial rather than refuse.
+            log.info("shipping partial-citation answer after failed regeneration")
+            return self._ok(partial, retrieved, decisions, usage)
 
         denial = last_verdict.denial if last_verdict else None
         log.warning(
@@ -154,6 +204,23 @@ class Answerer:
 
     # ------------------------------------------------------------------ #
 
+    def _ok(
+        self,
+        verdict: OutputVerdict,
+        retrieved: Sequence[Scored],
+        decisions: Sequence[Decision],
+        usage: Usage,
+    ) -> Answer:
+        return Answer(
+            status=AnswerStatus.OK,
+            text=verdict.text,
+            citations=verdict.citations,
+            retrieved=tuple(retrieved),
+            decisions=tuple(decisions),
+            usage=usage,
+            trace_id=current_trace_id(),
+        )
+
     def _refusal(
         self,
         status: AnswerStatus,
@@ -161,14 +228,20 @@ class Answerer:
         decisions: Sequence[Decision],
         usage: Usage,
     ) -> Answer:
+        # The template is static so redact() is a no-op today; it is routed through
+        # anyway so every text the answerer ships passes the same seam.
+        text, redaction = self._guard.redact(
+            "I can't give a properly cited answer to that from the indexed papers, "
+            "so I'd rather not answer than answer without evidence."
+        )
+        all_decisions = list(decisions)
+        if redaction is not None:
+            all_decisions.append(redaction)
         return Answer(
             status=status,
-            text=(
-                "I can't give a properly cited answer to that from the indexed papers, "
-                "so I'd rather not answer than answer without evidence."
-            ),
+            text=text,
             retrieved=tuple(retrieved),
-            decisions=tuple(decisions),
+            decisions=tuple(all_decisions),
             usage=usage,
             trace_id=current_trace_id(),
         )
@@ -179,28 +252,39 @@ def _parse(parsed: Mapping[str, Any] | None, raw_text: str) -> tuple[str, list[M
 
     Falls back to treating the whole response as uncited prose when parsing fails,
     which then fails citation validation and produces an honest refusal rather than
-    a crash.
+    a crash. A structurally wrong `answer` (dict, list, null, missing) gets the same
+    raw-text fallback rather than a str() coercion: its repr must never ship as
+    prose, and the fallback fails validation with the retryable
+    `output.citation.none_valid` rule rather than the non-retryable `output.empty`.
     """
     if parsed is None:
         return raw_text.strip(), []
 
-    text = str(parsed.get("answer", "")).strip()
+    answer = parsed.get("answer")
+    if not isinstance(answer, str):
+        return raw_text.strip(), []
+
     raw = parsed.get("citations", [])
     citations: list[Mapping[str, str]] = []
     if isinstance(raw, list):
         for entry in raw:
-            if isinstance(entry, Mapping):
-                citations.append(
-                    {
-                        "chunk_id": str(entry.get("chunk_id", "")),
-                        "quote": str(entry.get("quote", "")),
-                    }
-                )
-    return text, citations
+            if not isinstance(entry, Mapping):
+                continue
+            chunk_id = entry.get("chunk_id", "")
+            quote = entry.get("quote", "")
+            # Non-string citation fields are the model misreading the schema, not
+            # evidence; dropping the entry keeps str() reprs out of validation.
+            if not isinstance(chunk_id, str) or not isinstance(quote, str):
+                continue
+            citations.append({"chunk_id": chunk_id, "quote": quote})
+    return answer.strip(), citations
 
 
 def _is_model_refusal(text: str, citations: Sequence[Mapping[str, str]]) -> bool:
     if citations:
         return False
-    lowered = text.lower()
-    return any(marker in lowered for marker in _REFUSAL_MARKERS)
+    stripped = text.strip()
+    if len(stripped) > _REFUSAL_MAX_CHARS:
+        return False
+    head = stripped[:_REFUSAL_MARKER_WINDOW].lower()
+    return any(marker in head for marker in _REFUSAL_MARKERS)

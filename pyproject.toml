@@ -17,7 +17,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Heavy model deps. Unit tests never need these.
-ingest = ["surya-ocr>=0.6", "pypdfium2>=4.30"]
+# surya pinned to a tested minor: its Python API moves between minors.
+# pypdfium2 v5 reworks the bookmark API read_outline depends on.
+ingest = ["surya-ocr>=0.22,<0.23", "pypdfium2>=4.30,<5"]
 embed = ["sentence-transformers>=3.0"]
 index = ["faiss-cpu>=1.8"]
 generate = ["anthropic>=0.40"]

@@ -112,7 +112,17 @@ class MultiQueryTransform:
         paraphrases = parse_query_list(response.text, limit=self._count)
         # The original always leads: a bad paraphrase must not be able to displace
         # the question the user actually asked.
-        queries = (query, *(p for p in paraphrases if p.lower() != query.lower()))
+        # Dedupe among the paraphrases too, not just against the original: a small
+        # model repeating itself would otherwise give one phrasing a double dense
+        # vote in the fusion, which silently reweights retrieval.
+        seen = {query.lower()}
+        unique: list[str] = []
+        for paraphrase in paraphrases:
+            key = paraphrase.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(paraphrase)
+        queries = (query, *unique)
         return RewriteResult(queries=queries, strategy="multi_query", llm_calls=1)
 
 

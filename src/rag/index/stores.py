@@ -1,9 +1,11 @@
 """Vector and lexical index implementations.
 
 `InMemoryVectorStore` is the reference: exact brute-force cosine, no dependencies,
-used by every unit test. `FaissVectorStore` is the same semantics at speed. Both
-must agree on ordering, and a test asserts that they do, which is what keeps the
-fast path honest.
+used by every unit test. `FaissVectorStore` is the same semantics at speed. A
+parity test (skipped when faiss is not installed) checks that the two agree on
+results: identical scores, identical ordering up to tied scores. Tie ordering
+between backends is not guaranteed; within each numpy-based store it is made
+deterministic with a stable sort.
 """
 
 from __future__ import annotations
@@ -66,7 +68,9 @@ class InMemoryVectorStore:
             return []
         normalized = query / max(float(np.linalg.norm(query)), 1e-12)
         scores = self._vectors @ normalized.astype(np.float32)
-        top = np.argsort(-scores)[: min(k, self.size)]
+        # Stable sort so tied scores (duplicate texts embed identically) come back
+        # in insertion order on every numpy version, not quicksort-partition order.
+        top = np.argsort(-scores, kind="stable")[: min(k, self.size)]
         return [Hit(chunk_id=self._ids[i], score=float(scores[i])) for i in top]
 
     def save(self, directory: Path) -> None:
@@ -80,13 +84,16 @@ class InMemoryVectorStore:
     @classmethod
     def load(cls, directory: Path) -> InMemoryVectorStore:
         directory = Path(directory)
-        meta_path = directory / _META_FILE
-        if not meta_path.exists():
-            raise IndexError_(f"no index metadata at {meta_path}")
-        meta = json.loads(meta_path.read_text())
+        meta = _load_meta(directory, expected_kind="inmemory")
         store = cls(dimension=int(meta["dimension"]))
         store._ids = json.loads((directory / _IDS_FILE).read_text())
         store._vectors = np.load(directory / _VECTORS_FILE).astype(np.float32)
+        if len(store._ids) != store._vectors.shape[0]:
+            raise IndexError_(
+                f"index at {directory} has {len(store._ids)} ids but "
+                f"{store._vectors.shape[0]} vectors; the save was partial or the files "
+                f"are from different builds. Rebuild the index (`rag index`)."
+            )
         return store
 
 
@@ -146,14 +153,44 @@ class FaissVectorStore:
         import faiss
 
         directory = Path(directory)
-        meta_path = directory / _META_FILE
-        if not meta_path.exists():
-            raise IndexError_(f"no index metadata at {meta_path}")
-        meta = json.loads(meta_path.read_text())
+        meta = _load_meta(directory, expected_kind="faiss")
         store = cls(dimension=int(meta["dimension"]))
         store._index = faiss.read_index(str(directory / _FAISS_FILE))
         store._ids = json.loads((directory / _IDS_FILE).read_text())
+        if int(store._index.d) != store._dimension:
+            raise IndexError_(
+                f"index at {directory} declares dimension {store._dimension} but the "
+                f"FAISS file holds {int(store._index.d)}-dim vectors. Rebuild the "
+                f"index (`rag index`)."
+            )
+        if int(store._index.ntotal) != len(store._ids):
+            raise IndexError_(
+                f"index at {directory} has {len(store._ids)} ids but "
+                f"{int(store._index.ntotal)} vectors; the save was partial or the files "
+                f"are from different builds. Rebuild the index (`rag index`)."
+            )
         return store
+
+
+def _load_meta(directory: Path, *, expected_kind: str) -> dict[str, Any]:
+    """Read index metadata and refuse a cross-kind load.
+
+    The two store kinds share ids.json but keep distinct vector files, so loading
+    one kind's ids next to the other kind's stale vector file would silently pair
+    wrong chunk ids with confident scores. The recorded kind exists to catch that.
+    """
+    meta_path = directory / _META_FILE
+    if not meta_path.exists():
+        raise IndexError_(f"no index metadata at {meta_path}")
+    meta: dict[str, Any] = json.loads(meta_path.read_text())
+    kind = meta.get("kind")
+    if kind != expected_kind:
+        raise IndexError_(
+            f"index at {directory} was built as {kind!r} but is being loaded as "
+            f"{expected_kind!r}. Rebuild the index (`rag index`) or set index.store "
+            f"to {kind!r}."
+        )
+    return meta
 
 
 def _new_faiss_index(dimension: int) -> Any:
@@ -220,7 +257,9 @@ class Bm25Index:
         for i, token_set in enumerate(self._token_sets):
             if not (token_set & query_set):
                 scores[i] = float("-inf")
-        top = np.argsort(-scores)[: min(k, self.size)]
+        # Stable sort: tied scores (near-boilerplate sections) keep insertion order
+        # across numpy versions instead of quicksort-partition order.
+        top = np.argsort(-scores, kind="stable")[: min(k, self.size)]
         return [
             Hit(chunk_id=self._ids[i], score=float(scores[i]))
             for i in top
@@ -238,9 +277,17 @@ class Bm25Index:
         path = Path(directory) / cls.FILENAME
         if not path.exists():
             raise IndexError_(f"no BM25 index at {path}")
-        payload = json.loads(path.read_text())
+        # ValueError covers json.JSONDecodeError; TypeError covers valid JSON of the
+        # wrong shape (a top-level list). Callers must see one typed error, not a
+        # parser traceback.
+        try:
+            payload = json.loads(path.read_text())
+            ids = list(payload["ids"])
+            texts = list(payload["texts"])
+        except (ValueError, KeyError, TypeError) as exc:
+            raise IndexError_(f"corrupt BM25 index at {path}: {exc}") from exc
         index = cls()
-        index.add(list(payload["ids"]), list(payload["texts"]))
+        index.add(ids, texts)
         return index
 
 

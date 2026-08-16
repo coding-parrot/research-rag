@@ -53,15 +53,17 @@ class RetrievalGuard:
         self._config = config
 
     def check(
-        self, results: tuple[Scored, ...], *, top_dense_score: float | None = None
+        self, results: tuple[Scored, ...], *, top_dense_score: float | None
     ) -> RetrievalVerdict:
         """Validate a retrieval before it reaches the model.
 
-        `top_dense_score` is the best raw cosine similarity, the calibrated signal
-        for the relevance floor. Post-fusion `Scored.score` values are rank-based
-        (RRF) or unbounded logits (cross-encoder); thresholds on those mean nothing.
-        When it is not supplied (tests, vanilla single-query mode), the top result's
-        own score is used.
+        `top_dense_score` is the best raw cosine similarity for the user's original
+        query, the only calibrated signal for the relevance floor. It is required:
+        post-fusion `Scored.score` values are rank-based (RRF) or unbounded logits
+        (cross-encoder), and falling back to them would flip the guard's behaviour
+        based on which reranker is configured. `None` means dense search produced no
+        ranking at all; results present in that state are BM25 exact-term hits,
+        which the floor cannot measure and must not refuse.
         """
         decisions: list[Decision] = []
 
@@ -76,22 +78,46 @@ class RetrievalGuard:
                 ),
             )
 
-        top = top_dense_score if top_dense_score is not None else results[0].score
-        if top < self._config.relevance_floor:
+        if top_dense_score is None:
+            # Lexical-only retrieval: the dense index returned zero hits (empty or
+            # broken vector store) while BM25 found exact-term matches. Those are
+            # sufficient evidence to proceed; refusing them on a cosine floor with
+            # no cosine to measure would silently disable the whole system.
+            log.warning(
+                "dense index produced no ranking; relevance floor skipped",
+                fields={"results": len(results), "hint": "check the vector index"},
+            )
+            decisions.append(
+                Decision.allow(
+                    "retrieval.relevance_floor",
+                    "no dense signal; proceeding on lexical exact-term results",
+                )
+            )
+        elif top_dense_score < self._config.relevance_floor:
             decisions.append(
                 Decision.deny(
                     "retrieval.relevance_floor",
                     "I could not find anything in the indexed papers that speaks to that question.",
-                    evidence=f"top dense score {top:.3f} < floor {self._config.relevance_floor:.3f}",
+                    evidence=(
+                        f"top dense score {top_dense_score:.3f} < floor "
+                        f"{self._config.relevance_floor:.3f}"
+                    ),
                 )
             )
             log.info(
                 "refused below relevance floor",
-                fields={"top_score": round(top, 4), "floor": self._config.relevance_floor},
+                fields={
+                    "top_score": round(top_dense_score, 4),
+                    "floor": self._config.relevance_floor,
+                },
             )
             return RetrievalVerdict(results=results, decisions=tuple(decisions))
-
-        decisions.append(Decision.allow("retrieval.relevance_floor", f"top dense score {top:.3f}"))
+        else:
+            decisions.append(
+                Decision.allow(
+                    "retrieval.relevance_floor", f"top dense score {top_dense_score:.3f}"
+                )
+            )
 
         if self._config.scan_retrieved_for_injection:
             decisions.extend(self._scan(results))

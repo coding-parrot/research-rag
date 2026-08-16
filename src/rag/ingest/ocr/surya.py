@@ -127,7 +127,14 @@ class SuryaOcrEngine:
             raise OcrError("pypdfium2 is required for ingest") from exc
 
         scale = self._config.dpi / 72.0
-        doc = pdfium.PdfDocument(str(pdf_path))
+        # The open call is guarded separately from rendering: a truncated download
+        # still starts with %PDF- and passes the fetch magic check, then fails here.
+        # Wrapping it into OcrError keeps the one-bad-document isolation contract:
+        # the service fails this document and carries on with the rest of the run.
+        try:
+            doc = pdfium.PdfDocument(str(pdf_path))
+        except Exception as exc:
+            raise OcrError(f"could not open {pdf_path}: {exc}") from exc
         try:
             return [doc[i].render(scale=scale).to_pil() for i in range(len(doc))]
         except Exception as exc:
@@ -138,15 +145,51 @@ class SuryaOcrEngine:
     def _read_batch(
         self, images: list[Any], page_numbers: list[int], predictors: dict[str, Any]
     ) -> list[Block]:
-        layout_results = predictors["layout"](images)
-        recognition_results = predictors["recognition"](images)
+        try:
+            layout_results = list(predictors["layout"](images))
+            recognition_results = list(self._recognise(images, predictors))
+        except Exception as exc:
+            # Surya's call signatures have drifted across releases. An API mismatch
+            # must name the installed version and this adapter, not surface as a
+            # bare TypeError from deep inside a batch.
+            raise OcrError(
+                f"surya predictor call failed (surya-ocr {self.version}): {exc}; "
+                f"the installed surya API may not match the rag.ingest.ocr.surya adapter"
+            ) from exc
+
+        # A predictor that returns fewer (or offset) results than pages would let
+        # zip silently drop or misassign trailing pages while the page count in the
+        # report still comes from rasterisation. Fail the document loudly instead.
+        if not len(images) == len(layout_results) == len(recognition_results):
+            raise OcrError(
+                f"surya returned mismatched batch results: {len(images)} pages, "
+                f"{len(layout_results)} layout, {len(recognition_results)} recognition"
+            )
 
         blocks: list[Block] = []
         for image, page, layout, recognised in zip(
-            images, page_numbers, layout_results, recognition_results, strict=False
+            images, page_numbers, layout_results, recognition_results, strict=True
         ):
             blocks.extend(self._merge_page(page, layout, recognised, image, predictors))
         return blocks
+
+    def _recognise(self, images: list[Any], predictors: dict[str, Any]) -> Any:
+        """Run text recognition, tolerating both known call signatures.
+
+        Recent surya releases accept bare images (full-page mode); others require
+        text-line locations from a detection predictor. Try the bare call first
+        and fall back on TypeError, building the detection predictor lazily so
+        the common path never pays for it.
+        """
+        recognition = predictors["recognition"]
+        try:
+            return recognition(images)
+        except TypeError:
+            if "detection" not in predictors:
+                from surya.detection import DetectionPredictor
+
+                predictors["detection"] = DetectionPredictor(predictors["manager"])
+            return recognition(images, det_predictor=predictors["detection"])
 
     def _merge_page(
         self,
@@ -197,7 +240,12 @@ class SuryaOcrEngine:
         return blocks
 
     def _table_text(self, image: Any, box: BBox | None, predictors: dict[str, Any]) -> str:
-        """Render a table region as pipe-delimited rows so it survives chunking as text."""
+        """Render a table region as pipe-delimited rows so it survives chunking as text.
+
+        Returns "" whenever recognition fails or yields nothing beyond separators;
+        the caller then keeps the recognition-pass text for the region instead of
+        replacing real content with pipe garbage.
+        """
         if box is None:
             return ""
         try:
@@ -211,9 +259,23 @@ class SuryaOcrEngine:
                 row = int(getattr(cell, "row_id", 0))
                 col = int(getattr(cell, "col_id", 0))
                 rows.setdefault(row, []).append((col, str(getattr(cell, "text", "")).strip()))
-            return "\n".join(
+            rendered = "\n".join(
                 " | ".join(text for _, text in sorted(cols)) for _, cols in sorted(rows.items())
             )
+            # Structure-only output (every cell empty) joins into a truthy string of
+            # separators that would survive the caller's emptiness check. Treat it
+            # as a failed extraction, not as text.
+            if not rendered.replace("|", "").strip():
+                return ""
+            return rendered
+        except TypeError as exc:
+            # Same failure class as recognition: call-signature drift between surya
+            # releases. Name the installed version rather than blaming the table.
+            log.warning(
+                "table predictor API mismatch",
+                fields={"error": str(exc), "surya": self.version},
+            )
+            return ""
         except Exception as exc:  # a bad table must not fail the whole document
             log.warning("table recognition failed", fields={"error": str(exc)})
             return ""

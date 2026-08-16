@@ -72,7 +72,7 @@ items never gate CI** — the runner refuses to enforce thresholds on them.
 
 ```
 src/rag/
-  domain.py          frozen dataclasses, no dependencies; chunk ids are content-addressed
+  domain.py          frozen dataclasses, no dependencies; chunk ids are position-addressed and deterministic
   config.py          one hashable config drives every stage; run manifests record it
   ingest/            manifest -> fetch -> OCR (Surya, cached) -> normalize -> headers
   chunking/          SectionChunker: pure function, property-tested invariants

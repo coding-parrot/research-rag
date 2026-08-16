@@ -79,7 +79,11 @@ class IngestService:
         self._chunker = SectionChunker(config.chunk)
 
     def ingest(
-        self, manifest: Manifest, *, paper_ids: Sequence[str] | None = None
+        self,
+        manifest: Manifest,
+        *,
+        paper_ids: Sequence[str] | None = None,
+        manifest_path: Path | None = None,
     ) -> tuple[list[Chunk], IngestReport]:
         papers = manifest.select(paper_ids)
         report = IngestReport(
@@ -88,12 +92,14 @@ class IngestService:
         )
         chunks: list[Chunk] = []
 
-        fetched = self._fetcher.fetch_all(papers)
+        fetched, fetch_failures = self._fetcher.fetch_all(papers)
         # Pin any digests discovered on first fetch back into the manifest file, so
-        # the next run verifies against them instead of trusting the network.
+        # the next run verifies against them instead of trusting the network. Pins
+        # go back to the path the manifest was loaded from; the config path is only
+        # a fallback for callers that did not say where it came from.
         if any(r.newly_pinned for r in fetched):
             pinned = pin_digests(manifest, fetched)
-            save_manifest(pinned, self._config.paths.corpus_manifest)
+            save_manifest(pinned, manifest_path or self._config.paths.corpus_manifest)
             log.info("pinned new digests into the manifest")
 
         for result in fetched:
@@ -102,6 +108,11 @@ class IngestService:
             )
             report.documents.append(doc_report)
             chunks.extend(doc_chunks)
+
+        # A paper that failed to fetch is a failed document, not a silent omission:
+        # it must appear in the report and trip the unhealthy exit code downstream.
+        for paper_id, error in fetch_failures:
+            report.documents.append(DocumentReport(doc_id=paper_id, ok=False, error=error))
 
         for doc in report.unhealthy:
             log.warning(
@@ -145,6 +156,11 @@ class IngestService:
         except OcrError as exc:
             log.error("ocr failed", fields={"doc_id": doc_id, "error": str(exc)})
             return DocumentReport(doc_id=doc_id, ok=False, error=str(exc)), []
+        except Exception as exc:
+            # The isolation contract above holds for any fault, not just OCR: one
+            # broken document must never abort the rest of the corpus mid-run.
+            log.error("ingest failed", fields={"doc_id": doc_id, "error": str(exc)})
+            return DocumentReport(doc_id=doc_id, ok=False, error=str(exc)), []
 
 
 def run_ingest(
@@ -154,7 +170,9 @@ def run_ingest(
     config.paths.ensure()
     manifest = load_manifest(config.paths.corpus_manifest)
     service = IngestService(config, ocr)
-    chunks, report = service.ingest(manifest, paper_ids=paper_ids)
+    chunks, report = service.ingest(
+        manifest, paper_ids=paper_ids, manifest_path=config.paths.corpus_manifest
+    )
 
     report_path = config.paths.runs / f"ingest-{time.strftime('%Y%m%d-%H%M%S')}.json"
     report_path.write_text(report.to_json())

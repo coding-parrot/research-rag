@@ -43,20 +43,23 @@ def reciprocal_rank_fusion(
 
 
 def deduplicate(
-    scored: Sequence[tuple[Chunk, float]], *, threshold: float = 0.97
+    scored: Sequence[tuple[Chunk, float]], *, threshold: float = 0.75
 ) -> list[tuple[Chunk, float]]:
-    """Drop chunks that are near-duplicates of something already kept.
+    """Drop chunks that are near-verbatim copies of, or fully contained in, a kept chunk.
 
-    This fires more than you would expect on a research corpus: overlapping parts of
-    a split section share text by construction, and papers quote each other. A
-    duplicate in the context window costs tokens and buys nothing.
+    Similarity is containment (shared shingles over the smaller set), not Jaccard:
+    Jaccard punishes length differences, so a chunk quoted whole inside a longer one
+    scores ~0.35 and never trips a high threshold, while containment scores it 1.0.
+    Adjacent parts of a split section share only their construction overlap
+    (containment ~0.2) and are deliberately retained: the rest of each part is
+    unique content.
     """
     kept: list[tuple[Chunk, float]] = []
     seen_shingles: list[frozenset[str]] = []
 
     for chunk, score in scored:
         shingles = _shingles(chunk.text)
-        if any(_jaccard(shingles, other) >= threshold for other in seen_shingles):
+        if any(_containment(shingles, other) >= threshold for other in seen_shingles):
             continue
         kept.append((chunk, score))
         seen_shingles.append(shingles)
@@ -91,8 +94,8 @@ def _shingles(text: str, size: int = 5) -> frozenset[str]:
     return frozenset(" ".join(words[i : i + size]) for i in range(len(words) - size + 1))
 
 
-def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
+def _containment(left: frozenset[str], right: frozenset[str]) -> float:
+    """Fraction of the smaller shingle set that appears in the larger one."""
     if not left or not right:
         return 0.0
-    union = len(left | right)
-    return len(left & right) / union if union else 0.0
+    return len(left & right) / min(len(left), len(right))

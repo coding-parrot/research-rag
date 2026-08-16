@@ -95,10 +95,16 @@ the tiny section before it when the merge policy runs over this document.
 
 
 @pytest.fixture()
-def config() -> Config:
-    """Test config: fake providers, small budgets, permissive thresholds."""
+def config(tmp_path_factory: pytest.TempPathFactory) -> Config:
+    """Test config: fake providers, small budgets, permissive thresholds.
+
+    `paths.data` points at a fresh temp directory: the embed cache and index files
+    are written wherever this config says, and a test run must never write into
+    the repo working tree or read state a previous run left there.
+    """
     return Config.model_validate(
         {
+            "paths": {"data": str(tmp_path_factory.mktemp("data"))},
             "ocr": {"engine": "fake"},
             "chunk": {"max_chunk_tokens": 128, "part_overlap_tokens": 16, "min_chunk_chars": 80},
             "embed": {"provider": "fake", "model": "fake", "dimension": 32},

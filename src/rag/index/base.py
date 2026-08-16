@@ -129,10 +129,17 @@ class ChunkStore:
                 fh.write(json.dumps(asdict(chunk), ensure_ascii=False) + "\n")
 
     @classmethod
-    def load(cls, directory: Path) -> ChunkStore:
+    def load(cls, directory: Path, *, hint: str = "run `rag index` first") -> ChunkStore:
+        """Load a store, or fail with a caller-supplied next step.
+
+        The hint is a parameter because the right command depends on which store is
+        missing: the staged store is written by `rag ingest`, the final index by
+        `rag index`, and telling a user to re-run the command that just failed
+        loops them forever.
+        """
         path = Path(directory) / cls.FILENAME
         if not path.exists():
-            raise IndexError_(f"no chunk store at {path}; run `rag index` first")
+            raise IndexError_(f"no chunk store at {path}; {hint}")
         chunks = []
         with path.open(encoding="utf-8") as fh:
             for line in fh:

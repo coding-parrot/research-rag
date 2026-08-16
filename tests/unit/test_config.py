@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from rag.config import ChunkConfig, Config
+from rag.errors import ConfigError
 
 
 class TestConfigHash:
@@ -24,6 +25,18 @@ class TestConfigHash:
         chunk_changed = Config.model_validate({"chunk": {"max_chunk_tokens": 256}})
         assert base.ingest_hash() == retrieval_changed.ingest_hash()
         assert base.ingest_hash() != chunk_changed.ingest_hash()
+
+    def test_ingest_hash_ignores_ocr_throughput_and_caching(self):
+        # Regression: flipping ocr.cache or ocr.batch_size changed ingest_hash
+        # even though neither affects chunk content, so tooling read a spurious
+        # "chunk-affecting config changed" signal.
+        base = Config()
+        cache_off = Config.model_validate({"ocr": {"cache": False}})
+        batched = Config.model_validate({"ocr": {"batch_size": 8}})
+        dpi_changed = Config.model_validate({"ocr": {"dpi": 200}})
+        assert base.ingest_hash() == cache_off.ingest_hash()
+        assert base.ingest_hash() == batched.ingest_hash()
+        assert base.ingest_hash() != dpi_changed.ingest_hash()  # dpi does affect output
 
 
 class TestChunkConfig:
@@ -49,3 +62,16 @@ class TestLoad:
     def test_rejects_unknown_strategy(self):
         with pytest.raises(ValidationError):
             Config.model_validate({"retrieve": {"strategy": "quantum"}})
+
+    def test_missing_file_raises_config_error(self, tmp_path):
+        # Regression: a typo'd --config path surfaced as a bare
+        # FileNotFoundError traceback instead of the package's typed error.
+        missing = tmp_path / "nope.yaml"
+        with pytest.raises(ConfigError, match=r"nope\.yaml"):
+            Config.load(missing)
+
+    def test_invalid_yaml_raises_config_error(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("retrieve: [unclosed\n")
+        with pytest.raises(ConfigError, match="not valid YAML"):
+            Config.load(path)

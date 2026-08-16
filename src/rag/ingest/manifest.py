@@ -184,4 +184,7 @@ def save_manifest(manifest: Manifest, path: Path | str) -> None:
             for p in manifest.papers
         ],
     }
-    Path(path).write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True, width=100))
+    path = Path(path)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True, width=100))
+    tmp.replace(path)  # atomic, so a crash mid-pin never truncates the corpus manifest

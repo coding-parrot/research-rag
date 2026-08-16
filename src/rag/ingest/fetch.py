@@ -135,21 +135,28 @@ class PdfFetcher:
         path.write_bytes(data)
         return FetchResult(paper=paper, path=path, sha256=digest, downloaded=True)
 
-    def fetch_all(self, papers: Sequence[Paper]) -> list[FetchResult]:
-        """Fetch a set of papers, collecting failures instead of aborting on the first."""
+    def fetch_all(self, papers: Sequence[Paper]) -> tuple[list[FetchResult], list[tuple[str, str]]]:
+        """Fetch a set of papers, collecting failures instead of aborting on the first.
+
+        Failures are returned as (paper_id, error) pairs, not just logged: the
+        ingest service must record a paper that failed to fetch as a failed
+        document, or it vanishes from the report under a green exit code.
+        """
         results: list[FetchResult] = []
-        failures: list[str] = []
+        failures: list[tuple[str, str]] = []
         for paper in papers:
             try:
                 results.append(self.fetch(paper))
             except FetchError as exc:
-                failures.append(f"{paper.id}: {exc}")
+                failures.append((paper.id, str(exc)))
                 log.error("fetch failed", fields={"paper": paper.id, "error": str(exc)})
         if failures and not results:
-            raise FetchError("every fetch failed:\n  " + "\n  ".join(failures))
+            raise FetchError(
+                "every fetch failed:\n  " + "\n  ".join(f"{pid}: {err}" for pid, err in failures)
+            )
         if failures:
             log.warning("some fetches failed", fields={"failed": len(failures), "ok": len(results)})
-        return results
+        return results, failures
 
 
 def pin_digests(manifest: Manifest, results: Sequence[FetchResult]) -> Manifest:

@@ -84,9 +84,12 @@ class TestPipeline:
         assert client.call_count == 0  # nothing reached the model
         assert answer.usage.llm_calls == 0
 
-    def test_relevance_floor_refuses_without_model_call(self, corpus_chunks):
+    def test_relevance_floor_refuses_without_model_call(self, corpus_chunks, tmp_path):
         config = Config.model_validate(
             {
+                # tmp_path, not the default RepoRoot/data: the embed cache must not
+                # land in (or read from) the repo working tree.
+                "paths": {"data": str(tmp_path / "data")},
                 "embed": {"provider": "fake", "model": "fake", "dimension": 32},
                 "index": {"store": "inmemory"},
                 "retrieve": {"strategy": "vanilla", "rerank": False},

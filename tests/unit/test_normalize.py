@@ -1,7 +1,7 @@
 import itertools
 
-from rag.domain import BlockType
-from rag.ingest.normalize import clean_text, normalize
+from rag.domain import BlockType, PageSpan
+from rag.ingest.normalize import _page_spans, clean_text, normalize, page_of_offset
 from rag.ingest.ocr.fake import build_document
 
 
@@ -72,6 +72,17 @@ class TestNormalize:
         for span in result.spans:
             assert result.document.text[span.start : span.end] == clean_text(span.block.text)
 
+    def test_span_text_is_the_normalized_slice(self):
+        # A soft-wrapped block: the raw OCR text keeps the newline, the span must
+        # not. Header detection parses span.text, and a raw newline there breaks
+        # number splitting for wrapped headings.
+        doc = build_document("d", "informa-\ntion retrieval body text.\n\nSecond block here.")
+        result = normalize(doc)
+        for span in result.spans:
+            assert span.text == result.document.text[span.start : span.end]
+        assert result.spans[0].text == "information retrieval body text."
+        assert "\n" not in result.spans[0].text
+
     def test_page_spans_cover_document(self):
         doc = build_document(
             "d", "Page one text.\n\n@page\n\nPage two text.\n\n@page\n\nPage three."
@@ -80,11 +91,24 @@ class TestNormalize:
         text = result.document.text
         assert result.document.page_at(0) == 1
         assert result.document.page_at(len(text) - 1) == 3
-        # Every offset maps to some page; spans are contiguous.
+        # Every offset maps to some page; spans are contiguous and non-overlapping.
         spans = result.document.page_spans
         assert spans[0].start == 0
         for left, right in itertools.pairwise(spans):
-            assert left.end >= right.start
+            assert left.end == right.start
+
+    def test_interleaved_page_bounds_yield_non_overlapping_spans(self):
+        # Reading order interleaves the pages: page 1's last block ends at 500 but
+        # page 2's first block starts at 450. Offsets 450-499 belong to page 2
+        # blocks, so the page 1 span must be clipped at 450, not extended over it.
+        spans = _page_spans({1: [0, 500], 2: [450, 900]}, total=900)
+        assert spans == (
+            PageSpan(page=1, start=0, end=450),
+            PageSpan(page=2, start=450, end=900),
+        )
+        assert page_of_offset(spans, 449) == 1
+        assert page_of_offset(spans, 450) == 2
+        assert page_of_offset(spans, 499) == 2
 
     def test_title_inferred_from_title_block(self):
         doc = build_document("d", "[title] A Great Paper\n\nBody text follows here at length.")

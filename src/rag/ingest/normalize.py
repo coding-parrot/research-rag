@@ -43,15 +43,18 @@ BOILERPLATE_MAX_CHARS = 200
 
 @dataclass(frozen=True, slots=True)
 class BlockSpan:
-    """A block plus where its text landed in the normalised document."""
+    """A block plus where its text landed in the normalised document.
+
+    `text` is the normalised text, always identical to document.text[start:end].
+    The raw OCR string stays on `block.text`; signal code must never parse that,
+    because it can still carry soft line wraps that normalisation removed, and a
+    wrapped heading like "3.1 Selective\\nScan" then fails to number-split.
+    """
 
     block: Block
     start: int
     end: int
-
-    @property
-    def text(self) -> str:
-        return self.block.text
+    text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +90,7 @@ def normalize(ocr: OcrDocument, *, title: str | None = None) -> NormalizationRes
         start = cursor
         parts.append(text)
         cursor += len(text)
-        spans.append(BlockSpan(block=block, start=start, end=cursor))
+        spans.append(BlockSpan(block=block, start=start, end=cursor, text=text))
 
         bounds = page_bounds.setdefault(block.page, [start, cursor])
         bounds[0] = min(bounds[0], start)
@@ -195,16 +198,21 @@ def _page_spans(page_bounds: dict[int, list[int]], *, total: int) -> tuple[PageS
     """Contiguous, non-overlapping [start, end) span per page.
 
     Blocks from adjacent pages can interleave slightly once reading order is applied,
-    so we take each page's first offset as its boundary and let each page run until
-    the next one starts. That guarantees `page_at` is total over [0, total).
+    so page block extents can overlap their neighbours'. The boundary we keep is each
+    page's first offset: pages are ordered by that offset (not by page number, which
+    reading order may disagree with), and every span runs from the previous page's
+    end to the next page's first offset. Ends are clipped, never extended, so spans
+    cannot overlap, and `page_at` stays total over [0, total).
     """
     if not page_bounds:
         return ()
-    ordered = sorted(page_bounds.items())
+    ordered = sorted(page_bounds.items(), key=lambda item: item[1][0])
     spans: list[PageSpan] = []
-    for i, (page, (start, end)) in enumerate(ordered):
-        next_start = ordered[i + 1][1][0] if i + 1 < len(ordered) else total
-        spans.append(PageSpan(page=page, start=start if i else 0, end=max(end, next_start)))
+    cursor = 0
+    for i, (page, _bounds) in enumerate(ordered):
+        end = ordered[i + 1][1][0] if i + 1 < len(ordered) else total
+        spans.append(PageSpan(page=page, start=cursor, end=end))
+        cursor = end
     return tuple(spans)
 
 

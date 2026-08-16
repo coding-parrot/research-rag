@@ -171,7 +171,7 @@ class FakeEmbedder:
         vector: Vector = self.embed_documents([text])[0]
         return vector
 
-    def _vector(self, text: str) -> "Vector":
+    def _vector(self, text: str) -> Vector:
         """Bag-of-tokens projected into the vector space by stable hashing."""
         vector = np.zeros(self._dimension, dtype=np.float32)
         tokens = text.lower().split()

@@ -1,12 +1,14 @@
 import itertools
 import string
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from rag.chunking.section import SectionChunker
 from rag.config import ChunkConfig
 from rag.domain import Heading, NormalizedDocument, PageSpan
+from rag.errors import ConfigError
 from tests.conftest import LOPSIDED_MARKUP, PAPER_MARKUP, make_chunks, make_detected
 
 
@@ -125,6 +127,171 @@ class TestDegenerateInputs:
         assert chunks[0].section_title == "Introduction"
 
 
+def _flat_document(*lengths: int) -> NormalizedDocument:
+    """Contiguous whitespace-free sections: a frontmatter block, then one numbered
+    section per remaining length. No whitespace means offsets survive tightening
+    unchanged, so span assertions stay exact."""
+    text = ""
+    headings: list[Heading] = []
+    for i, length in enumerate(lengths):
+        if i > 0:
+            headings.append(
+                Heading(
+                    title=f"Sec{i}",
+                    level=1,
+                    char_start=len(text),
+                    page=1,
+                    number=str(i),
+                    confidence=1.0,
+                )
+            )
+        text += chr(ord("A") + i) * length
+    return NormalizedDocument(
+        doc_id="d",
+        title="T",
+        text=text,
+        headings=tuple(headings),
+        page_spans=(PageSpan(page=1, start=0, end=len(text)),),
+    )
+
+
+class TestMergePolicy:
+    def test_short_final_section_folds_backward(self):
+        # Frontmatter 50, Sec1 70, Sec2 880, Sec3 100 with floor 200: the
+        # undersized FINAL section has no follower, so it must fold into its
+        # predecessor instead of surviving alone as retrieval noise.
+        document = _flat_document(50, 70, 880, 100)
+        chunks, report = SectionChunker(ChunkConfig(min_chunk_chars=200)).chunk(document)
+        last = chunks[-1]
+        assert last.section_title == "Sec2"
+        assert last.char_end == 1100  # the 100-char tail was absorbed
+        assert "D" * 100 in last.text
+        assert report.sections_merged == 2  # Sec1 forward into frontmatter, Sec3 backward
+
+    def test_short_section_absorbs_at_most_one_follower(self):
+        # Frontmatter 50, Sec1 70, Sec2 880 with floor 200. Unlimited chaining
+        # used to merge all three into one span titled by the frontmatter,
+        # erasing Sec2's identity. The cap emits the still-short merge instead.
+        document = _flat_document(50, 70, 880)
+        chunks, report = SectionChunker(ChunkConfig(min_chunk_chars=200)).chunk(document)
+        assert [c.section_title for c in chunks] == ["Abstract and frontmatter", "Sec2"]
+        assert chunks[1].section_number == "2"
+        # The capped merge is emitted even though it is still under the floor.
+        assert chunks[0].char_end - chunks[0].char_start == 120
+        assert report.sections_merged == 1
+
+    def test_report_distinguishes_merge_collapse_from_detection_failure(self):
+        # Four detected sections, all under the floor. The report must keep the
+        # pre-merge detection count so a merge collapse is not misread as a
+        # header detection failure.
+        document = _flat_document(40, 40, 40, 40)
+        _, report = SectionChunker(ChunkConfig(min_chunk_chars=200)).chunk(document)
+        assert report.sections_before_merge == 4
+        assert report.sections_detected == 2
+        assert report.sections_merged == 2
+
+
+class TestDuplicateHeadingOffsets:
+    def _document(self, headings: tuple[Heading, ...]) -> NormalizedDocument:
+        text = "A" * 100 + "B" * 300
+        return NormalizedDocument(
+            doc_id="d",
+            title="T",
+            text=text,
+            headings=headings,
+            page_spans=(PageSpan(page=1, start=0, end=len(text)),),
+        )
+
+    def test_higher_confidence_heading_wins_and_drop_is_counted(self):
+        # Two headings anchored at the same offset: the higher-confidence one
+        # must survive regardless of order, and the drop must be reported
+        # instead of happening silently.
+        document = self._document(
+            (
+                Heading(title="First", level=1, char_start=0, page=1, number="1", confidence=0.9),
+                Heading(
+                    title="Strong", level=1, char_start=100, page=1, number="2", confidence=0.9
+                ),
+                Heading(title="Weak", level=1, char_start=100, page=1, number="3", confidence=0.4),
+            )
+        )
+        chunks, report = SectionChunker(ChunkConfig(min_chunk_chars=0)).chunk(document)
+        titles = [c.section_title for c in chunks]
+        assert "Strong" in titles
+        assert "Weak" not in titles
+        assert report.boundaries_dropped == 1
+
+    def test_equal_confidence_prefers_deeper_heading(self):
+        document = self._document(
+            (
+                Heading(title="Top", level=1, char_start=100, page=1, number="2", confidence=0.8),
+                Heading(
+                    title="Deep", level=2, char_start=100, page=1, number="2.1", confidence=0.8
+                ),
+            )
+        )
+        config = ChunkConfig(max_depth=2, min_chunk_chars=0)
+        chunks, report = SectionChunker(config).chunk(document)
+        titles = [c.section_title for c in chunks]
+        assert "Deep" in titles
+        assert "Top" not in titles
+        assert report.boundaries_dropped == 1
+
+
+class TestConfigGuards:
+    def test_zero_char_budget_rejected_at_construction(self):
+        # 64 tokens at 0.01 chars per token rounds to a 0-char budget, which
+        # would leave the split loop unable to advance. Construction must fail
+        # loudly instead of ingest hanging later.
+        config = ChunkConfig(max_chunk_tokens=64, chars_per_token=0.01)
+        assert config.max_chunk_chars == 0
+        with pytest.raises(ConfigError):
+            SectionChunker(config)
+
+
+class TestOffsetProvenance:
+    """Chunk text and offsets must agree, so provenance is checkable by slicing."""
+
+    def test_text_matches_slice_with_optional_header_prefix(self):
+        for markup in (PAPER_MARKUP, LOPSIDED_MARKUP):
+            document = make_detected(markup)
+            chunks = make_chunks(markup)
+            assert chunks
+            for chunk in chunks:
+                body = document.text[chunk.char_start : chunk.char_end]
+                assert body == body.strip()  # offsets are tightened, not the text
+                if chunk.part_index == 0:
+                    assert chunk.text == body
+                else:
+                    # Split parts re-attach the section header; the body portion
+                    # is still the exact slice.
+                    assert chunk.text.endswith(body)
+                    assert chunk.text[: -len(body)].endswith("\n\n")
+
+    def test_whitespace_only_parts_dropped_before_numbering(self):
+        # A split whose middle part is pure whitespace: surviving parts must be
+        # numbered contiguously with an accurate total, or citation labels
+        # advertise a part that does not exist.
+        text = "A" * 60 + "\n\n" + " " * 70 + "\n\n" + "B" * 40
+        document = NormalizedDocument(
+            doc_id="d",
+            title="T",
+            text=text,
+            headings=(),
+            page_spans=(PageSpan(page=1, start=0, end=len(text)),),
+        )
+        config = ChunkConfig(
+            max_chunk_tokens=64, chars_per_token=1.0, part_overlap_tokens=0, min_chunk_chars=0
+        )
+        chunks, _ = SectionChunker(config).chunk(document)
+        assert len(chunks) == 2
+        assert [c.part_index for c in chunks] == [0, 1]
+        assert all(c.part_count == 2 for c in chunks)
+        bodies = [document.text[c.char_start : c.char_end] for c in chunks]
+        assert bodies[0] == "A" * 60
+        assert bodies[1] == "B" * 40
+
+
 # --------------------------------------------------------------------------- #
 # Property tests: the invariants that make chunking trustworthy.
 # --------------------------------------------------------------------------- #
@@ -168,7 +335,11 @@ def test_chunk_offsets_are_monotonic_and_non_overlapping(words, positions):
 @given(words=_words, positions=st.lists(st.integers(min_value=1, max_value=25), max_size=4))
 @settings(max_examples=40, deadline=None)
 def test_no_body_text_is_lost(words, positions):
-    """Every character of the document lands in at least one chunk span."""
+    """Every non-whitespace character of the document lands in a chunk span.
+
+    Chunk offsets are tightened to the non-whitespace extent of each part, so the
+    characters falling outside every span must all be separator whitespace.
+    """
     markup = _synthesise(words, sorted(set(positions)))
     document = make_detected(markup)
     chunks = make_chunks(markup)
@@ -177,12 +348,12 @@ def test_no_body_text_is_lost(words, positions):
         return
 
     covered = sorted((c.char_start, c.char_end) for c in chunks)
-    cursor = covered[0][0]
-    assert cursor == 0
+    cursor = 0
     for start, end in covered:
-        assert start <= cursor  # no gap
+        if start > cursor:
+            assert not document.text[cursor:start].strip()  # gaps hold only whitespace
         cursor = max(cursor, end)
-    assert cursor == len(document.text)
+    assert not document.text[cursor:].strip()
 
 
 @given(words=_words)

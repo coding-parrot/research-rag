@@ -42,10 +42,14 @@ class RetrievalResult:
     deduped: int
     reranker: str
     missing_from_store: int = 0
-    # Best dense cosine similarity across all queries, before fusion. This is the
-    # calibrated relevance signal: post-fusion scores are rank-based (RRF) or
+    # Best dense cosine similarity for the ORIGINAL query only, before fusion. This
+    # is the calibrated relevance signal: post-fusion scores are rank-based (RRF) or
     # unbounded logits (cross-encoder), and a threshold on either is meaningless.
-    top_dense_score: float = 0.0
+    # Rewrites are excluded on purpose: a HyDE paragraph is invented text generated
+    # to resemble the corpus, so its cosine clears any floor regardless of whether
+    # the user's question is answerable. None means dense search produced no ranking
+    # at all (empty vector store), so no calibrated signal exists.
+    top_dense_score: float | None = None
 
     @property
     def top_score(self) -> float:
@@ -92,9 +96,19 @@ class Retriever:
 
         dense_rankings = [self._dense(q) for q in rewrite.queries]
         lexical_rankings = self._lexical_rankings(query, rewrite)
-        top_dense = max((hit.score for ranking in dense_rankings for hit in ranking), default=0.0)
+        top_dense = self._original_dense_top(query, rewrite, dense_rankings)
 
-        rankings = [r for r in (*dense_rankings, *lexical_rankings) if r]
+        # Weight the dense block so it carries constant total weight against the
+        # single lexical ranking: under multi-query, N equally weighted dense lists
+        # would otherwise dilute BM25 evidence N-fold as a side effect of the
+        # rewrite strategy, confounding the strategy ablation.
+        nonempty_dense = [r for r in dense_rankings if r]
+        nonempty_lexical = [r for r in lexical_rankings if r]
+        rankings = [*nonempty_dense, *nonempty_lexical]
+        # max(len, 1): with a broken dense index every dense ranking is empty and
+        # retrieval proceeds on lexical alone, which must not divide by zero.
+        dense_weight = 1.0 / max(len(nonempty_dense), 1)
+        weights = [dense_weight] * len(nonempty_dense) + [1.0] * len(nonempty_lexical)
         if not rankings:
             return RetrievalResult(
                 results=(),
@@ -107,7 +121,7 @@ class Retriever:
                 top_dense_score=top_dense,
             )
 
-        fused = reciprocal_rank_fusion(rankings, k=self._config.rrf_k)
+        fused = reciprocal_rank_fusion(rankings, k=self._config.rrf_k, weights=weights)
         resolved = self._store.resolve(fused[: self._config.fetch_k])
         missing = len(fused[: self._config.fetch_k]) - len(resolved)
         if missing:
@@ -119,11 +133,12 @@ class Retriever:
         before_dedup = len(resolved)
         deduped = deduplicate(resolved, threshold=self._guardrails.dedup_threshold)
 
-        # Rerank the deduped pool, asking for more than top_k so the per-document
-        # cap has something to fall back on when one paper dominates.
-        reranked = self._reranker.rerank(
-            query, deduped, top_k=max(self._config.top_k * 2, self._config.top_k)
-        )
+        # Rerank the entire deduped pool (bounded by fetch_k) so the per-document
+        # cap always has candidates to fall back on: a narrower rerank window can
+        # be filled by a single dominating paper, and capping it would then return
+        # fewer than top_k results even though cap-valid chunks from other papers
+        # sit just past the window.
+        reranked = self._reranker.rerank(query, deduped, top_k=len(deduped))
         capped = cap_per_document(reranked, max_per_doc=self._config.max_per_doc)
         final = capped[: self._config.top_k]
 
@@ -165,6 +180,22 @@ class Retriever:
     def _dense(self, query: str) -> list[Hit]:
         vector = self._embedder.embed_query(query)
         return self._vectors.search(vector, k=self._config.fetch_k)
+
+    def _original_dense_top(
+        self, query: str, rewrite: RewriteResult, dense_rankings: list[list[Hit]]
+    ) -> float | None:
+        """Best dense cosine for the user's own words, the relevance-floor signal.
+
+        Located by matching the query string, not by position: HyDE deliberately
+        puts the hypothetical first, so `rewrite.queries[0]` can be invented text.
+        Every current transform keeps the original among its queries; the extra
+        search is a fail-closed path for a future transform that drops it.
+        """
+        for rewritten, ranking in zip(rewrite.queries, dense_rankings, strict=True):
+            if rewritten == query:
+                return max((hit.score for hit in ranking), default=None)
+        ranking = self._dense(query)
+        return max((hit.score for hit in ranking), default=None)
 
     def _lexical_rankings(self, original: str, rewrite: RewriteResult) -> list[list[Hit]]:
         """BM25 over the user's actual words.

@@ -33,8 +33,16 @@ ConfigOption = Annotated[
 def _load(config_path: Path | None, verbose: bool = False) -> Config:
     import logging
 
+    from rag.errors import RagError
+
     configure_logging(logging.DEBUG if verbose else logging.INFO)
-    return Config.load(config_path)
+    try:
+        return Config.load(config_path)
+    except RagError as exc:
+        # A typed config failure is a usage error, not a crash: exit code 2 with
+        # the message, no traceback.
+        console.print(f"[red]config error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
 
 
 @app.command()
@@ -73,15 +81,35 @@ def ingest(
     console.print(f"{len(chunks)} chunks from {len(report.documents)} documents")
 
     # Chunks are staged to disk here and turned into an index by `rag index`.
+    # Only healthy documents are staged: an unhealthy document's chunks are
+    # typically one mislabeled whole-paper blob, and indexing them is exactly the
+    # silent retrieval poisoning the ingest report exists to prevent.
+    healthy_ids = {d.doc_id for d in report.documents if d.healthy}
+    staged_chunks = [c for c in chunks if c.doc_id in healthy_ids]
+
     staging = config.paths.index / "staged"
     from rag.index.base import ChunkStore
 
-    ChunkStore(chunks).save(staging)
-    console.print(f"chunks staged to {staging}")
+    if papers:
+        # A partial ingest refreshes the selected papers inside the staged store.
+        # Saving only the subset would truncate the previously staged corpus, so
+        # `rag index` would silently rebuild from just these papers.
+        existing = (
+            ChunkStore.load(staging).chunks if (staging / ChunkStore.FILENAME).exists() else ()
+        )
+        reingested = {d.doc_id for d in report.documents if d.ok}
+        store = ChunkStore(c for c in existing if c.doc_id not in reingested)
+        store.add(staged_chunks)
+    else:
+        store = ChunkStore(staged_chunks)
+    store.save(staging)
+    console.print(f"{len(store)} chunk(s) staged to {staging}")
 
     if report.unhealthy:
+        excluded = len(chunks) - len(staged_chunks)
         console.print(
-            f"[yellow]{len(report.unhealthy)} document(s) look unhealthy; see the report.[/yellow]"
+            f"[yellow]{len(report.unhealthy)} document(s) look unhealthy; "
+            f"{excluded} chunk(s) from them were not staged. See the ingest report.[/yellow]"
         )
         raise typer.Exit(code=1)
 
@@ -96,7 +124,9 @@ def index(
     from rag.app import build_index, save_index
     from rag.index.base import ChunkStore
 
-    staged = ChunkStore.load(config.paths.index / "staged")
+    # The staged store is written by `rag ingest`; the hint must not send the user
+    # back into the command that just failed.
+    staged = ChunkStore.load(config.paths.index / "staged", hint="run `rag ingest` first")
     bundle = build_index(config, list(staged.chunks))
     save_index(bundle, config.paths.index)
     console.print(f"indexed {len(staged)} chunks -> {config.paths.index}")
@@ -163,11 +193,21 @@ def run_eval(
 
     judge_obj = None
     if judge:
+        from rag.config import Secrets
+
+        # Mirror build_pipeline: the key lives in Secrets (.env via pydantic-settings,
+        # never exported to os.environ), so the SDK's env-var fallback cannot see it
+        # and it must be passed to the client explicitly.
+        secrets = Secrets()
+        api_key = (
+            secrets.anthropic_api_key.get_secret_value() if secrets.anthropic_api_key else None
+        )
         judge_client = build_client(
             config.eval.judge_provider,
             model=config.eval.judge_model,
             ollama_model=config.generate.ollama_model,
             ollama_host=config.generate.ollama_host,
+            api_key=api_key,
         )
         judge_obj = Judge(
             judge_client, model=config.eval.judge_model, effort=config.eval.judge_effort
@@ -244,11 +284,18 @@ def headers(
         )
 
     console.print(table)
-    if scores:
-        mean_f1 = mean([s.f1 for s in scores])
-        console.print(f"mean F1: {mean_f1:.3f} (threshold {config.eval.min_header_boundary_f1})")
-        if mean_f1 < config.eval.min_header_boundary_f1:
-            raise typer.Exit(code=1)
+    # Zero scored documents must fail, not pass: a CI gate built on this command
+    # would otherwise go green with the F1 threshold never evaluated.
+    if not scores:
+        console.print(
+            f"[red]no documents were scored: no labelled PDFs found under "
+            f"{config.paths.pdfs}; run `rag ingest` first[/red]"
+        )
+        raise typer.Exit(code=1)
+    mean_f1 = mean([s.f1 for s in scores])
+    console.print(f"mean F1: {mean_f1:.3f} (threshold {config.eval.min_header_boundary_f1})")
+    if mean_f1 < config.eval.min_header_boundary_f1:
+        raise typer.Exit(code=1)
 
 
 @app.command()

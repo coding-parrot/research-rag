@@ -79,7 +79,11 @@ def _cache_key(pdf_path: Path, engine: str, engine_version: str, config: OcrConf
         "pdf": sha256_file(pdf_path),
         "engine": engine,
         "engine_version": engine_version,
-        "config": config.model_dump(mode="json", exclude={"cache"}),
+        # batch_size is excluded: it only changes how pages are grouped per predictor
+        # call, never the recognised output, so bumping it must not re-OCR the corpus
+        # (config.ingest_hash excludes it for the same reason). engine is excluded as
+        # redundant: the engine/engine_version payload fields above carry identity.
+        "config": config.model_dump(mode="json", exclude={"cache", "batch_size", "engine"}),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()[:16]

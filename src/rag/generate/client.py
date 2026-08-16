@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from rag.domain import Usage
-from rag.errors import LlmError
+from rag.errors import ConfigError, LlmError
 from rag.observability import get_logger
 
 log = get_logger("llm")
@@ -207,6 +207,13 @@ class OllamaClient:
                 body = response.json()
         except httpx.HTTPError as exc:
             raise LlmError(f"ollama call failed: {exc}. Is `ollama serve` running?") from exc
+        except ValueError as exc:
+            # A proxy in front of Ollama can answer 200 with an HTML error page.
+            # That is a bad body from a live endpoint, not a dead server, hence a
+            # message without the "is it running" hint.
+            raise LlmError(f"ollama returned a non-JSON body: {exc}") from exc
+        if not isinstance(body, dict):
+            raise LlmError(f"ollama returned a non-object JSON body: {type(body).__name__}")
 
         text = str(body.get("response", ""))
         return LlmResponse(
@@ -314,7 +321,14 @@ def build_client(
     provider: str, *, model: str, ollama_model: str, ollama_host: str, api_key: str | None = None
 ) -> LlmClient:
     if provider == "fake":
-        return FakeLlmClient()
+        # The fake is a test double; tests construct FakeLlmClient directly and
+        # inject it. A config that reaches this seam with provider=fake (a copied
+        # test fixture, say) would otherwise run a pipeline that silently answers
+        # nothing, so it fails loudly instead.
+        raise ConfigError(
+            "generate.provider='fake' is test-only; tests construct FakeLlmClient "
+            "directly. Set provider to 'anthropic' or 'ollama'."
+        )
     if provider == "ollama":
         return OllamaClient(model=ollama_model, host=ollama_host)
     return AnthropicClient(default_model=model, api_key=api_key)

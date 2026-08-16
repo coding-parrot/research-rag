@@ -74,6 +74,9 @@ class HeadingCandidate:
     char_start: int
     source: HeaderSource
     number: str | None = None
+    # Bookmark-tree depth. Only the outline signal knows it; for an unnumbered
+    # title it is the only depth information that exists at all.
+    level: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,10 +190,15 @@ class HeaderDetector:
                 continue
 
             number = best.number
+            # An unnumbered title carries no depth of its own, so fall back to the
+            # bookmark-tree level when the winning candidate has one. Otherwise a
+            # nested bookmark would surface as level 1 and become a chunk boundary
+            # inside its parent section at max_depth=1.
+            level = _level_of(number) if number else (best.level or 1)
             headings.append(
                 Heading(
                     title=best.title.strip(),
-                    level=_level_of(number),
+                    level=level,
                     char_start=best.char_start,
                     page=page_of_offset(document.page_spans, best.char_start),
                     number=number,
@@ -252,6 +260,11 @@ def read_outline(pdf_path: Path) -> tuple[OutlineEntry, ...]:
 
     entries: list[OutlineEntry] = []
     try:
+        # item.title / item.page_index is the pypdfium2 v4 bookmark API. v5 replaced
+        # get_toc's items with PdfBookmark objects (get_title()/get_dest() methods),
+        # under which this loop raises AttributeError; the except below then degrades
+        # to no outline signal rather than breaking ingest. The pyproject pin should
+        # stay below 5 until this loop speaks the v5 API.
         for item in doc.get_toc():
             title = (item.title or "").strip()
             if not title:
@@ -277,12 +290,16 @@ def _from_outline(
 ) -> list[HeadingCandidate]:
     """Anchor each bookmark to a character offset by searching near its page.
 
-    A bookmark knows its title and page but not its offset. We search that page's
-    span for the title text; if it is not found (recognition differs slightly from
-    the bookmark string) the bookmark is dropped rather than anchored to a guess.
+    A bookmark knows its title and page but not its offset. We look for the title
+    as a full line within the page's span; a substring hit inside body prose ("in
+    the conclusion we argue...") would plant a trust-1.0 boundary mid-paragraph.
+    The line may carry a section number the bookmark title had stripped, so the
+    pattern allows an optional numeric prefix and the anchor lands on the number,
+    keeping it out of the previous chunk's tail. If nothing matches near the page
+    (recognition differs slightly from the bookmark string) the bookmark is
+    dropped rather than anchored to a guess.
     """
     candidates: list[HeadingCandidate] = []
-    lowered = document.text.lower()
 
     for entry in outline:
         number, title = _split_number(entry.title)
@@ -295,15 +312,24 @@ def _from_outline(
         needle = _normalise_title(title)
         if len(needle) < 3:
             continue
-        found = lowered.find(needle, start, end)
-        if found == -1:
-            found = lowered.find(needle)  # fall back to a document-wide search
-        if found == -1:
+        # IGNORECASE over the original text, never a search over text.lower():
+        # str.lower() is not length-preserving (U+0130 lowers to two code points),
+        # and drifted offsets silently corrupt every downstream slice.
+        pattern = re.compile(
+            r"^(?:\d{1,2}(?:\.\d{1,2}){0,2}\.?[\s:.\-]+)?" + re.escape(needle) + r"\s*$",
+            re.MULTILINE | re.IGNORECASE,
+        )
+        match = pattern.search(document.text, start, end)
+        if match is None:
             continue
 
         candidates.append(
             HeadingCandidate(
-                title=title, char_start=found, source=HeaderSource.OUTLINE, number=number
+                title=title,
+                char_start=match.start(),
+                source=HeaderSource.OUTLINE,
+                number=number,
+                level=entry.level,
             )
         )
     return candidates

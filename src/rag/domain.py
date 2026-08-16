@@ -203,19 +203,33 @@ class NormalizedDocument:
 
 
 def make_chunk_id(doc_id: str, char_start: int, char_end: int, part_index: int) -> str:
-    """Content-addressed chunk id.
+    """Position-addressed chunk id: (doc, offsets, part), not the chunk text.
 
-    Deterministic across runs and machines, which is what makes snapshot tests and
-    cross-run eval comparisons possible. Truncated to 16 hex chars: at our corpus
-    size that is far past collision risk and stays readable in logs.
+    Deterministic across runs and machines given identical ingest output, which is
+    what makes snapshot tests and cross-run eval comparisons possible. It is NOT
+    content-addressed: if re-OCR or a normalisation change alters the text while
+    leaving these offsets intact, the id stays the same for different text.
+    Anything that persists ids across ingest runs must also key on an ingest hash
+    (`Config.ingest_hash`). Truncated to 16 hex chars: at our corpus size that is
+    far past collision risk and stays readable in logs.
     """
+    # The text is deliberately not part of the hash material: including it would
+    # churn every id on any normalisation change. The trade-off is that the id
+    # names a location within one ingest output, not the content at it.
     raw = f"{doc_id}:{char_start}:{char_end}:{part_index}".encode()
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
 @dataclass(frozen=True, slots=True)
 class Chunk:
-    """One section (or one part of an oversized section) of one paper."""
+    """One section (or one part of an oversized section) of one paper.
+
+    Offsets are trimmed to the non-whitespace extent of the span, so for a chunk
+    without a repeated header (every `part_index == 0` chunk) `text` is exactly
+    `document.text[char_start:char_end]`. Parts after the first re-attach the
+    section header so they stay self-describing; for those the invariant is
+    `text == header_line + "\\n\\n" + document.text[char_start:char_end]`.
+    """
 
     chunk_id: str
     doc_id: str

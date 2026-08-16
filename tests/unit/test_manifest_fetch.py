@@ -134,8 +134,10 @@ class TestFetcher:
             ),
         )
         downloader = StubDownloader({"https://x/ok.pdf": PDF})
-        results = PdfFetcher(tmp_path, downloader).fetch_all(manifest.papers)
+        results, failures = PdfFetcher(tmp_path, downloader).fetch_all(manifest.papers)
         assert [r.paper.id for r in results] == ["ok"]
+        assert [pid for pid, _ in failures] == ["bad"]
+        assert "bad" in failures[0][1]
 
     def test_pin_digests_only_fills_blanks(self, tmp_path):
         downloader = StubDownloader({"https://x/m.pdf": PDF})
