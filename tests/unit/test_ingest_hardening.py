@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from rag.cli import app as cli_app
 from rag.config import Config, OcrConfig
-from rag.domain import BBox
+from rag.domain import BlockType
 from rag.errors import IndexError_, OcrError
 from rag.index.base import ChunkStore
 from rag.ingest.fetch import PdfFetcher, StubDownloader, sha256_bytes
@@ -222,35 +222,33 @@ class TestSuryaRasterise:
 
 
 class TestSuryaBatch:
-    def test_recognition_type_error_retries_with_detection_predictor(self):
+    def test_recognition_receives_layout_results(self):
+        """The 0.22 API is layout-aware: recognition must get the layout output."""
         engine = SuryaOcrEngine(OcrConfig())
-        seen: list[Any] = []
+        seen: dict[str, Any] = {}
+        layout_results = [SimpleNamespace(bboxes=[])]
 
-        def recognition(images: list[Any], det_predictor: Any = None) -> list[Any]:
-            seen.append(det_predictor)
-            if det_predictor is None:
-                raise TypeError("recognition() requires det_predictor")
-            return [SimpleNamespace(text_lines=[]) for _ in images]
+        def recognition(images: list[Any], layout_results: Any = None) -> list[Any]:
+            seen["layout_results"] = layout_results
+            return [SimpleNamespace(blocks=[]) for _ in images]
 
         predictors: dict[str, Any] = {
             "manager": object(),
-            "detection": "primed-detector",  # pre-primed so no surya import happens
-            "layout": lambda images: [SimpleNamespace(bboxes=[]) for _ in images],
+            "layout": lambda images: layout_results,
             "recognition": recognition,
         }
         blocks = engine._read_batch([object()], [1], predictors)
         assert blocks == []
-        assert seen == [None, "primed-detector"]
+        assert seen["layout_results"] == layout_results
 
     def test_api_mismatch_wraps_into_ocr_error_naming_the_adapter(self):
         engine = SuryaOcrEngine(OcrConfig())
 
         def recognition(images: list[Any], **kwargs: Any) -> list[Any]:
-            raise TypeError("unexpected keyword argument 'det_predictor'")
+            raise TypeError("unexpected keyword argument 'layout_results'")
 
         predictors: dict[str, Any] = {
             "manager": object(),
-            "detection": object(),
             "layout": lambda images: [SimpleNamespace(bboxes=[])],
             "recognition": recognition,
         }
@@ -262,62 +260,74 @@ class TestSuryaBatch:
         predictors: dict[str, Any] = {
             "manager": object(),
             "layout": lambda images: [SimpleNamespace(bboxes=[]) for _ in images],
-            "recognition": lambda images: [SimpleNamespace(text_lines=[]) for _ in images[:-1]],
+            "recognition": lambda images, layout_results=None: [
+                SimpleNamespace(blocks=[]) for _ in images[:-1]
+            ],
         }
         with pytest.raises(OcrError, match="4 pages, 4 layout, 3 recognition"):
             engine._read_batch([object()] * 4, [1, 2, 3, 4], predictors)
 
 
-class _Image:
-    def crop(self, box: Any) -> _Image:
-        return self
+def _ocr_block(**overrides: Any) -> SimpleNamespace:
+    base = dict(
+        label="Text",
+        html="<p>body text</p>",
+        polygon=[[0, 0], [100, 0], [100, 20], [0, 20]],
+        confidence=0.9,
+        reading_order=0,
+        skipped=False,
+        error=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
-class TestSuryaTableText:
-    def test_structure_only_cells_are_discarded(self):
+class TestSuryaPageBlocks:
+    def test_blocks_map_label_text_and_order(self):
         engine = SuryaOcrEngine(OcrConfig())
-        cells = [
-            SimpleNamespace(row_id=0, col_id=0, text=""),
-            SimpleNamespace(row_id=0, col_id=1, text=" "),
-        ]
-        predictors: dict[str, Any] = {"table": lambda crops: [SimpleNamespace(cells=cells)]}
-        box = BBox(x0=0.0, y0=0.0, x1=10.0, y1=10.0)
-        assert engine._table_text(_Image(), box, predictors) == ""
-
-    def test_real_cell_text_renders_as_rows(self):
-        engine = SuryaOcrEngine(OcrConfig())
-        cells = [
-            SimpleNamespace(row_id=0, col_id=0, text="metric"),
-            SimpleNamespace(row_id=0, col_id=1, text="ours"),
-        ]
-        predictors: dict[str, Any] = {"table": lambda crops: [SimpleNamespace(cells=cells)]}
-        box = BBox(x0=0.0, y0=0.0, x1=10.0, y1=10.0)
-        assert engine._table_text(_Image(), box, predictors) == "metric | ours"
-
-    def test_merge_page_keeps_recognised_text_when_table_rec_is_empty(self):
-        engine = SuryaOcrEngine(OcrConfig())
-        region = SimpleNamespace(
-            position=0, confidence=0.9, bbox=(0.0, 0.0, 100.0, 50.0), label="Table"
-        )
-        layout = SimpleNamespace(bboxes=[region])
-        line = SimpleNamespace(bbox=(1.0, 1.0, 99.0, 10.0), text="accuracy 71.2 84.5")
-        recognised = SimpleNamespace(text_lines=[line])
-        predictors: dict[str, Any] = {
-            "table": lambda crops: [
-                SimpleNamespace(cells=[SimpleNamespace(row_id=0, col_id=0, text="")])
+        recognised = SimpleNamespace(
+            blocks=[
+                _ocr_block(label="Section-header", html="<h2>3 Experiments</h2>", reading_order=0),
+                _ocr_block(label="Text", html="<p>We evaluate on two tasks.</p>", reading_order=1),
             ]
-        }
-        blocks = engine._merge_page(1, layout, recognised, _Image(), predictors)
-        assert [b.text for b in blocks] == ["accuracy 71.2 84.5"]
+        )
+        blocks = engine._page_blocks(2, recognised)
+        assert [b.type for b in blocks] == [BlockType.SECTION_HEADER, BlockType.TEXT]
+        assert blocks[0].text == "3 Experiments"
+        assert blocks[1].page == 2
+        assert blocks[0].bbox is not None and blocks[0].bbox.x1 == 100.0
 
-    def test_table_call_type_error_is_non_fatal(self):
+    def test_skipped_and_errored_blocks_dropped(self):
         engine = SuryaOcrEngine(OcrConfig())
+        recognised = SimpleNamespace(
+            blocks=[
+                _ocr_block(skipped=True),
+                _ocr_block(error="unreadable"),
+                _ocr_block(html="<p>kept</p>", reading_order=2),
+            ]
+        )
+        blocks = engine._page_blocks(1, recognised)
+        assert [b.text for b in blocks] == ["kept"]
 
-        def table(crops: list[Any]) -> list[Any]:
-            raise TypeError("unexpected call shape")
+    def test_low_confidence_blocks_dropped(self):
+        engine = SuryaOcrEngine(OcrConfig(min_block_confidence=0.5))
+        recognised = SimpleNamespace(blocks=[_ocr_block(confidence=0.2)])
+        assert engine._page_blocks(1, recognised) == []
 
-        box = BBox(x0=0.0, y0=0.0, x1=10.0, y1=10.0)
-        assert engine._table_text(_Image(), box, {"table": table}) == ""
+    def test_table_html_renders_as_pipe_rows(self):
+        engine = SuryaOcrEngine(OcrConfig())
+        table_html = "<table><tr><th>metric</th><th>ours</th></tr><tr><td>BLEU</td><td>27.4</td></tr></table>"
+        recognised = SimpleNamespace(blocks=[_ocr_block(label="Table", html=table_html)])
+        blocks = engine._page_blocks(1, recognised)
+        assert blocks[0].text == "metric | ours\nBLEU | 27.4"
+
+    def test_table_label_without_table_markup_falls_back_to_text(self):
+        engine = SuryaOcrEngine(OcrConfig())
+        recognised = SimpleNamespace(
+            blocks=[_ocr_block(label="Table", html="<p>caption-ish content</p>")]
+        )
+        blocks = engine._page_blocks(1, recognised)
+        assert blocks[0].text == "caption-ish content"
 
 
 class TestOcrCacheKey:

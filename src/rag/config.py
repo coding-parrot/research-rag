@@ -50,7 +50,7 @@ class PathsConfig(BaseModel):
 
 
 class OcrConfig(BaseModel):
-    engine: Literal["surya", "fake"] = "surya"
+    engine: Literal["surya", "pypdfium", "fake"] = "pypdfium"
     dpi: int = Field(default=150, ge=72, le=400)
     # Surya is slow enough that batching matters even on MPS.
     batch_size: int = Field(default=4, ge=1, le=64)
@@ -133,7 +133,8 @@ class RetrieveConfig(BaseModel):
     top_k: int = Field(default=4, ge=1, le=50)
     # Candidate pool pulled before reranking.
     fetch_k: int = Field(default=20, ge=1, le=200)
-    rerank: bool = True
+    # Off by default: the cross-encoder is a 1.1GB download. Flip on once cached.
+    rerank: bool = False
     reranker: Literal["cross-encoder", "cohere", "none"] = "cross-encoder"
     reranker_model: str = "BAAI/bge-reranker-base"
     cohere_rerank_model: str = "rerank-v4.0-fast"
@@ -145,8 +146,8 @@ class RetrieveConfig(BaseModel):
 
 
 class GenerateConfig(BaseModel):
-    provider: Literal["anthropic", "ollama", "fake"] = "anthropic"
-    model: str = "claude-opus-5"
+    provider: Literal["openai", "anthropic", "ollama", "fake"] = "openai"
+    model: str = "gpt-5.6-sol"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_tokens: int = Field(default=4096, ge=256)
     ollama_model: str = "gemma2:2b"
@@ -177,8 +178,8 @@ class GuardrailConfig(BaseModel):
 
 
 class EvalConfig(BaseModel):
-    judge_provider: Literal["anthropic", "ollama", "fake"] = "anthropic"
-    judge_model: str = "claude-opus-5"
+    judge_provider: Literal["openai", "anthropic", "ollama", "fake"] = "openai"
+    judge_model: str = "gpt-5.6-sol"
     judge_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     # Deterministic thresholds that gate CI. Raise these as the system improves.
     min_recall_at_k: float = 0.75
@@ -194,10 +195,11 @@ class EvalConfig(BaseModel):
 class Secrets(BaseSettings):
     """Secrets live only here, only from the environment."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(RepoRoot / ".env"), extra="ignore")
 
     anthropic_api_key: SecretStr | None = None
     cohere_api_key: SecretStr | None = None
+    openai_api_key: SecretStr | None = None
 
 
 class Config(BaseModel):

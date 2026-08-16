@@ -1,11 +1,16 @@
-"""Surya OCR engine.
+"""Surya OCR engine, written against surya-ocr 0.22.x (see the pin in pyproject).
 
-Pipeline per document: rasterise pages with pypdfium2, run layout detection to get
-typed regions and reading order, run text recognition, and optionally run table
-recognition over TABLE regions.
+Pipeline per document: rasterise pages with pypdfium2, run layout detection, then
+run recognition WITH the layout results. In 0.22.x recognition is layout-aware:
+`RecognitionPredictor(images, layout_results=...)` returns one `PageOCRResult` per
+page whose `.blocks` each carry the layout label, the reading order, the region
+polygon, and the recognised content as HTML. That one integrated call replaces the
+box-overlap heuristics older adapters needed to marry layout regions to text lines,
+and table blocks arrive with their HTML structure intact, so no separate table
+recognition pass is required.
 
-The point of using Surya here rather than a plain text extractor is reading order.
-On a two-column arXiv paper `page.get_text()` interleaves the columns, which silently
+The point of using Surya rather than a plain text extractor is reading order. On a
+two-column arXiv paper `page.get_text()` interleaves the columns, which silently
 destroys section boundaries before the chunker ever sees them.
 
 Imports are lazy. Nothing in this module is imported unless someone actually runs
@@ -70,10 +75,6 @@ class SuryaOcrEngine:
                 "layout": LayoutPredictor(manager),
                 "recognition": RecognitionPredictor(manager),
             }
-            if self._config.detect_tables:
-                from surya.table_rec import TableRecPredictor
-
-                predictors["table"] = TableRecPredictor(manager)
 
         self._predictors = predictors
         return predictors
@@ -147,7 +148,9 @@ class SuryaOcrEngine:
     ) -> list[Block]:
         try:
             layout_results = list(predictors["layout"](images))
-            recognition_results = list(self._recognise(images, predictors))
+            recognition_results = list(
+                predictors["recognition"](images, layout_results=layout_results)
+            )
         except Exception as exc:
             # Surya's call signatures have drifted across releases. An API mismatch
             # must name the installed version and this adapter, not surface as a
@@ -167,141 +170,98 @@ class SuryaOcrEngine:
             )
 
         blocks: list[Block] = []
-        for image, page, layout, recognised in zip(
-            images, page_numbers, layout_results, recognition_results, strict=True
-        ):
-            blocks.extend(self._merge_page(page, layout, recognised, image, predictors))
+        for page, recognised in zip(page_numbers, recognition_results, strict=True):
+            blocks.extend(self._page_blocks(page, recognised))
         return blocks
 
-    def _recognise(self, images: list[Any], predictors: dict[str, Any]) -> Any:
-        """Run text recognition, tolerating both known call signatures.
+    def _page_blocks(self, page: int, recognised: Any) -> list[Block]:
+        """One `PageOCRResult` to typed blocks.
 
-        Recent surya releases accept bare images (full-page mode); others require
-        text-line locations from a detection predictor. Try the bare call first
-        and fall back on TypeError, building the detection predictor lazily so
-        the common path never pays for it.
+        Each `BlockOCRResult` already carries everything we need: the layout label,
+        `reading_order`, the region polygon, and the content as HTML. Blocks that
+        recognition skipped or failed are dropped individually rather than failing
+        the page: `skipped` marks regions recognition chose not to read (figures),
+        `error` marks regions it could not read.
         """
-        recognition = predictors["recognition"]
-        try:
-            return recognition(images)
-        except TypeError:
-            if "detection" not in predictors:
-                from surya.detection import DetectionPredictor
-
-                predictors["detection"] = DetectionPredictor(predictors["manager"])
-            return recognition(images, det_predictor=predictors["detection"])
-
-    def _merge_page(
-        self,
-        page: int,
-        layout: Any,
-        recognised: Any,
-        image: Any,
-        predictors: dict[str, Any],
-    ) -> list[Block]:
-        """Assign recognised text lines to layout regions by box overlap.
-
-        Layout gives us typed regions and their reading order; recognition gives us
-        text lines. Neither alone is enough, so we assign each line to the region it
-        sits inside and keep the region's reading position.
-        """
-        lines = list(getattr(recognised, "text_lines", []) or [])
-        regions = sorted(
-            getattr(layout, "bboxes", []) or [],
-            key=lambda r: getattr(r, "position", 0),
-        )
-
+        raw_blocks = list(getattr(recognised, "blocks", []) or [])
         blocks: list[Block] = []
-        for order, region in enumerate(regions):
-            confidence = float(getattr(region, "confidence", 1.0) or 1.0)
+
+        for fallback_order, raw in enumerate(raw_blocks):
+            if getattr(raw, "skipped", False) or getattr(raw, "error", None):
+                continue
+            confidence = float(getattr(raw, "confidence", 1.0) or 1.0)
             if confidence < self._config.min_block_confidence:
                 continue
 
-            box = _to_bbox(getattr(region, "bbox", None))
-            block_type = map_surya_label(str(getattr(region, "label", "")))
-            text = _text_in_region(lines, box)
-
-            if block_type is BlockType.TABLE and "table" in predictors:
-                text = self._table_text(image, box, predictors) or text
-
+            block_type = map_surya_label(str(getattr(raw, "label", "")))
+            html = str(getattr(raw, "html", "") or "")
+            text = (
+                _table_html_to_pipes(html) if block_type is BlockType.TABLE else _html_to_text(html)
+            )
             if not text.strip():
                 continue
 
+            order = getattr(raw, "reading_order", None)
             blocks.append(
                 Block(
                     type=block_type,
                     text=text,
                     page=page,
-                    order=order,
-                    bbox=box,
+                    order=int(order) if order is not None else fallback_order,
+                    bbox=_polygon_to_bbox(getattr(raw, "polygon", None)),
                     confidence=confidence,
                 )
             )
         return blocks
 
-    def _table_text(self, image: Any, box: BBox | None, predictors: dict[str, Any]) -> str:
-        """Render a table region as pipe-delimited rows so it survives chunking as text.
 
-        Returns "" whenever recognition fails or yields nothing beyond separators;
-        the caller then keeps the recognition-pass text for the region instead of
-        replacing real content with pipe garbage.
-        """
-        if box is None:
-            return ""
-        try:
-            crop = image.crop((box.x0, box.y0, box.x1, box.y1))
-            result = predictors["table"]([crop])[0]
-            cells = getattr(result, "cells", []) or []
-            if not cells:
-                return ""
-            rows: dict[int, list[tuple[int, str]]] = {}
-            for cell in cells:
-                row = int(getattr(cell, "row_id", 0))
-                col = int(getattr(cell, "col_id", 0))
-                rows.setdefault(row, []).append((col, str(getattr(cell, "text", "")).strip()))
-            rendered = "\n".join(
-                " | ".join(text for _, text in sorted(cols)) for _, cols in sorted(rows.items())
-            )
-            # Structure-only output (every cell empty) joins into a truthy string of
-            # separators that would survive the caller's emptiness check. Treat it
-            # as a failed extraction, not as text.
-            if not rendered.replace("|", "").strip():
-                return ""
-            return rendered
-        except TypeError as exc:
-            # Same failure class as recognition: call-signature drift between surya
-            # releases. Name the installed version rather than blaming the table.
-            log.warning(
-                "table predictor API mismatch",
-                fields={"error": str(exc), "surya": self.version},
-            )
-            return ""
-        except Exception as exc:  # a bad table must not fail the whole document
-            log.warning("table recognition failed", fields={"error": str(exc)})
-            return ""
-
-
-def _to_bbox(raw: Any) -> BBox | None:
-    if raw is None:
+def _polygon_to_bbox(polygon: Any) -> BBox | None:
+    """Surya polygons are [[x, y], ...] corner lists; we keep the enclosing box."""
+    if not polygon:
         return None
     try:
-        x0, y0, x1, y1 = (float(v) for v in raw)
-    except (TypeError, ValueError):
+        xs = [float(point[0]) for point in polygon]
+        ys = [float(point[1]) for point in polygon]
+    except (TypeError, ValueError, IndexError):
         return None
-    return BBox(x0=x0, y0=y0, x1=x1, y1=y1)
+    if not xs or not ys:
+        return None
+    return BBox(x0=min(xs), y0=min(ys), x1=max(xs), y1=max(ys))
 
 
-def _text_in_region(lines: list[Any], box: BBox | None) -> str:
-    """Join the recognised lines whose centre falls inside a layout region."""
-    if box is None:
+def _html_to_text(html: str) -> str:
+    """Flatten a block's HTML content to text, preserving line structure."""
+    if not html:
         return ""
-    inside: list[tuple[float, str]] = []
-    for line in lines:
-        line_box = _to_bbox(getattr(line, "bbox", None))
-        if line_box is None:
-            continue
-        cx = (line_box.x0 + line_box.x1) / 2
-        cy = (line_box.y0 + line_box.y1) / 2
-        if box.x0 <= cx <= box.x1 and box.y0 <= cy <= box.y1:
-            inside.append((line_box.y0, str(getattr(line, "text", ""))))
-    return "\n".join(text for _, text in sorted(inside)).strip()
+    if "<" not in html:
+        return html.strip()
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    return soup.get_text(separator=" ").strip()
+
+
+def _table_html_to_pipes(html: str) -> str:
+    """Render a table block's HTML as pipe-delimited rows.
+
+    Keeps the table retrievable as text (a table-lookup question must be able to
+    match cell contents), while staying readable inside a prompt. Returns "" when
+    the HTML has no usable cells so the block is dropped rather than emitting
+    separator garbage.
+    """
+    if not html:
+        return ""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    rows: list[str] = []
+    for tr in soup.find_all("tr"):
+        cells = [cell.get_text(separator=" ").strip() for cell in tr.find_all(["td", "th"])]
+        if any(cells):
+            rows.append(" | ".join(cells))
+    if rows:
+        return "\n".join(rows)
+    # Table label without table markup: fall back to the flat text.
+    return _html_to_text(html)

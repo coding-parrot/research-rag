@@ -13,13 +13,15 @@ dependencies = [
     "rich>=13.7",
     # Pure-python, numpy-only. Core because hybrid retrieval is the default.
     "rank-bm25>=0.2.2",
+    # HTML case-study extraction (blogs in the corpus). Pure-python.
+    "beautifulsoup4>=4.12",
 ]
 
 [project.optional-dependencies]
 # Heavy model deps. Unit tests never need these.
 # surya pinned to a tested minor: its Python API moves between minors.
-# pypdfium2 v5 reworks the bookmark API read_outline depends on.
-ingest = ["surya-ocr>=0.22,<0.23", "pypdfium2>=4.30,<5"]
+# pypdfium2 follows surya's own requirement (>=5.10.1,<6); read_outline targets the v5 API.
+ingest = ["surya-ocr>=0.22,<0.23", "pypdfium2>=5.10.1,<6"]
 embed = ["sentence-transformers>=3.0"]
 index = ["faiss-cpu>=1.8"]
 generate = ["anthropic>=0.40"]

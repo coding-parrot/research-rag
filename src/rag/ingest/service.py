@@ -1,4 +1,9 @@
-"""The ingest service: manifest -> PDFs -> OCR -> normalise -> headings -> chunks.
+"""The ingest service: manifest -> documents -> blocks -> normalise -> headings -> chunks.
+
+Two document kinds share one downstream path. PDFs go fetch -> OCR; HTML blogs go
+snapshot -> `extract_html`. Both produce an `OcrDocument`, and everything after
+that (normalise, header detection, chunking) is the same code, so a blog chunk
+and a paper chunk are indistinguishable to retrieval.
 
 Produces two artifacts:
   - the chunk set (handed to the indexing service)
@@ -20,21 +25,29 @@ from pathlib import Path
 from rag.chunking.section import ChunkReport, SectionChunker
 from rag.config import Config
 from rag.domain import Chunk
-from rag.errors import OcrError
-from rag.ingest.fetch import PdfFetcher, pin_digests
+from rag.errors import FetchError, OcrError
+from rag.ingest.fetch import FetchResult, PdfFetcher, pin_digests
 from rag.ingest.headers import DetectionReport, HeaderDetector, read_outline
-from rag.ingest.manifest import Manifest, load_manifest, save_manifest
+from rag.ingest.html import HtmlSnapshotFetcher, extract_html
+from rag.ingest.manifest import Manifest, Paper, PaperKind, load_manifest, save_manifest
 from rag.ingest.normalize import normalize
 from rag.ingest.ocr.base import OcrEngine
 from rag.observability import get_logger, timed
 
 log = get_logger("ingest")
 
+# An engineering blog with an intro and two h2 sections is a perfectly healthy
+# document; a research paper with two sections is a detection failure. The html
+# floor is therefore lower, and the pdf floor stays whatever the per-stage
+# reports say (currently 3).
+_HTML_MIN_SECTIONS = 2
+
 
 @dataclass(frozen=True, slots=True)
 class DocumentReport:
     doc_id: str
     ok: bool
+    kind: PaperKind = "pdf"
     pages: int = 0
     blocks: int = 0
     headers: DetectionReport | None = None
@@ -43,13 +56,20 @@ class DocumentReport:
 
     @property
     def healthy(self) -> bool:
-        return (
-            self.ok
-            and self.headers is not None
-            and self.headers.looks_healthy
-            and self.chunks is not None
-            and self.chunks.looks_healthy
-        )
+        """Kind-aware structural health.
+
+        The per-stage `looks_healthy` properties encode research-paper
+        expectations. For html the floor drops to `_HTML_MIN_SECTIONS` without
+        touching those properties, so pdf semantics are unchanged.
+        """
+        if not self.ok or self.headers is None or self.chunks is None:
+            return False
+        if self.kind == "html":
+            return (
+                self.headers.accepted >= _HTML_MIN_SECTIONS
+                and self.chunks.chunks_emitted >= _HTML_MIN_SECTIONS
+            )
+        return self.headers.looks_healthy and self.chunks.looks_healthy
 
 
 @dataclass(slots=True)
@@ -71,10 +91,19 @@ class IngestReport:
 
 
 class IngestService:
-    def __init__(self, config: Config, ocr: OcrEngine, fetcher: PdfFetcher | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        ocr: OcrEngine,
+        fetcher: PdfFetcher | None = None,
+        html_fetcher: HtmlSnapshotFetcher | None = None,
+    ) -> None:
         self._config = config
         self._ocr = ocr
         self._fetcher = fetcher or PdfFetcher(config.paths.pdfs)
+        # Snapshots live at data/html/<id>.html, next to data/pdfs; the manifest
+        # comment in corpus.yaml tells humans the same path.
+        self._html_fetcher = html_fetcher or HtmlSnapshotFetcher(config.paths.data / "html")
         self._detector = HeaderDetector(config.headers)
         self._chunker = SectionChunker(config.chunk)
 
@@ -92,13 +121,18 @@ class IngestService:
         )
         chunks: list[Chunk] = []
 
-        fetched, fetch_failures = self._fetcher.fetch_all(papers)
+        pdf_papers = [p for p in papers if p.kind == "pdf"]
+        html_papers = [p for p in papers if p.kind == "html"]
+        fetched, fetch_failures = self._fetcher.fetch_all(pdf_papers)
+        html_fetched, html_failures = self._fetch_html(html_papers)
         # Pin any digests discovered on first fetch back into the manifest file, so
-        # the next run verifies against them instead of trusting the network. Pins
-        # go back to the path the manifest was loaded from; the config path is only
-        # a fallback for callers that did not say where it came from.
-        if any(r.newly_pinned for r in fetched):
-            pinned = pin_digests(manifest, fetched)
+        # the next run verifies against them instead of trusting the network (or a
+        # snapshot someone later re-saves). Pins go back to the path the manifest
+        # was loaded from; the config path is only a fallback for callers that did
+        # not say where it came from.
+        all_fetched = [*fetched, *html_fetched]
+        if any(r.newly_pinned for r in all_fetched):
+            pinned = pin_digests(manifest, all_fetched)
             save_manifest(pinned, manifest_path or self._config.paths.corpus_manifest)
             log.info("pinned new digests into the manifest")
 
@@ -109,10 +143,19 @@ class IngestService:
             report.documents.append(doc_report)
             chunks.extend(doc_chunks)
 
+        for result in html_fetched:
+            doc_report, doc_chunks = self._ingest_html(result.paper, result.path)
+            report.documents.append(doc_report)
+            chunks.extend(doc_chunks)
+
         # A paper that failed to fetch is a failed document, not a silent omission:
         # it must appear in the report and trip the unhealthy exit code downstream.
         for paper_id, error in fetch_failures:
             report.documents.append(DocumentReport(doc_id=paper_id, ok=False, error=error))
+        for paper_id, error in html_failures:
+            report.documents.append(
+                DocumentReport(doc_id=paper_id, ok=False, kind="html", error=error)
+            )
 
         for doc in report.unhealthy:
             log.warning(
@@ -161,6 +204,58 @@ class IngestService:
             # broken document must never abort the rest of the corpus mid-run.
             log.error("ingest failed", fields={"doc_id": doc_id, "error": str(exc)})
             return DocumentReport(doc_id=doc_id, ok=False, error=str(exc)), []
+
+    def _fetch_html(
+        self, papers: Sequence[Paper]
+    ) -> tuple[list[FetchResult], list[tuple[str, str]]]:
+        """Fetch html snapshots, collecting failures per paper.
+
+        Deliberately NOT `PdfFetcher.fetch_all` semantics: that raises when every
+        fetch fails, but on a fresh checkout every snapshot is legitimately
+        missing, and aborting the run would take the pdf half of the corpus down
+        with it. Each failure becomes a failed document naming its snapshot path.
+        """
+        results: list[FetchResult] = []
+        failures: list[tuple[str, str]] = []
+        for paper in papers:
+            try:
+                results.append(self._html_fetcher.fetch(paper))
+            except FetchError as exc:
+                failures.append((paper.id, str(exc)))
+                log.error("fetch failed", fields={"paper": paper.id, "error": str(exc)})
+        return results, failures
+
+    def _ingest_html(self, paper: Paper, path: Path) -> tuple[DocumentReport, list[Chunk]]:
+        """One blog end to end, under the same isolation contract as `_ingest_one`.
+
+        Same normalise -> header detection -> chunker path as PDFs, minus the
+        outline signal, which only PDFs have.
+        """
+        try:
+            with timed(log, "ingest.document", doc_id=paper.id):
+                # errors="replace": a snapshot with a stray non-utf8 byte should
+                # cost one replacement character, not the whole document.
+                html = path.read_text(encoding="utf-8", errors="replace")
+                extracted = extract_html(html, paper.id, str(path))
+                normalized = normalize(extracted, title=paper.title)
+                headings, header_report = self._detector.detect(normalized)
+
+                document = replace(normalized.document, headings=tuple(headings))
+                doc_chunks, chunk_report = self._chunker.chunk(document)
+
+                report = DocumentReport(
+                    doc_id=paper.id,
+                    ok=True,
+                    kind="html",
+                    pages=extracted.page_count,
+                    blocks=len(extracted.blocks),
+                    headers=header_report,
+                    chunks=chunk_report,
+                )
+                return report, list(doc_chunks)
+        except Exception as exc:
+            log.error("ingest failed", fields={"doc_id": paper.id, "error": str(exc)})
+            return DocumentReport(doc_id=paper.id, ok=False, kind="html", error=str(exc)), []
 
 
 def run_ingest(

@@ -260,19 +260,27 @@ def read_outline(pdf_path: Path) -> tuple[OutlineEntry, ...]:
 
     entries: list[OutlineEntry] = []
     try:
-        # item.title / item.page_index is the pypdfium2 v4 bookmark API. v5 replaced
-        # get_toc's items with PdfBookmark objects (get_title()/get_dest() methods),
-        # under which this loop raises AttributeError; the except below then degrades
-        # to no outline signal rather than breaking ingest. The pyproject pin should
-        # stay below 5 until this loop speaks the v5 API.
-        for item in doc.get_toc():
-            title = (item.title or "").strip()
+        # pypdfium2 v5 bookmark API (matches the pyproject pin >=5.10.1,<6):
+        # get_toc() yields PdfBookmark objects carrying a 0-based `level` set during
+        # traversal, with the title behind get_title() and the target page behind
+        # get_dest(). A bookmark whose target is an action rather than a
+        # destination has no dest; it is dropped, since an unanchorable page hint
+        # cannot feed the page-windowed anchoring below.
+        for bookmark in doc.get_toc():
+            title = (bookmark.get_title() or "").strip()
             if not title:
                 continue
-            page_index = item.page_index if item.page_index is not None else 0
+            dest = bookmark.get_dest()
+            if dest is None:
+                continue
+            page_index = dest.get_index()
+            if page_index is None:
+                continue
             entries.append(
                 OutlineEntry(
-                    title=title, level=int(getattr(item, "level", 0)) + 1, page=page_index + 1
+                    title=title,
+                    level=int(getattr(bookmark, "level", 0)) + 1,
+                    page=int(page_index) + 1,
                 )
             )
     except Exception as exc:

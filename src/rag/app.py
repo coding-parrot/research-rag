@@ -51,9 +51,17 @@ def build_ocr_engine(config: Config) -> OcrEngine:
         return FakeOcrEngine.from_fixtures(config.paths.ocr_cache)
 
     from rag.ingest.ocr.cached import CachedOcrEngine
-    from rag.ingest.ocr.surya import SuryaOcrEngine
 
-    return CachedOcrEngine(SuryaOcrEngine(config.ocr), config.paths.ocr_cache, config.ocr)
+    inner: OcrEngine
+    if config.ocr.engine == "pypdfium":
+        from rag.ingest.ocr.pdfium import PdfiumTextEngine
+
+        inner = PdfiumTextEngine(config.ocr)
+    else:
+        from rag.ingest.ocr.surya import SuryaOcrEngine
+
+        inner = SuryaOcrEngine(config.ocr)
+    return CachedOcrEngine(inner, config.paths.ocr_cache, config.ocr)
 
 
 @dataclass(slots=True)
@@ -220,6 +228,7 @@ def build_pipeline(
         secrets.anthropic_api_key.get_secret_value() if secrets.anthropic_api_key else None
     )
     cohere_key = secrets.cohere_api_key.get_secret_value() if secrets.cohere_api_key else None
+    openai_key = secrets.openai_api_key.get_secret_value() if secrets.openai_api_key else None
 
     client = client or build_client(
         config.generate.provider,
@@ -227,6 +236,7 @@ def build_pipeline(
         ollama_model=config.generate.ollama_model,
         ollama_host=config.generate.ollama_host,
         api_key=anthropic_key,
+        openai_api_key=openai_key,
     )
 
     scope = ScopeClassifier(bundle.embedder)

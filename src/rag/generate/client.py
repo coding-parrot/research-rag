@@ -163,6 +163,131 @@ def _first_text(content: Sequence[Any]) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# OpenAI
+# --------------------------------------------------------------------------- #
+
+# Our effort ladder is Claude-shaped (five levels); OpenAI's reasoning_effort has
+# four. xhigh and max collapse onto OpenAI's ceiling.
+_OPENAI_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
+
+
+class OpenAiClient:
+    """OpenAI models via the official SDK's chat-completions surface.
+
+    Structured output uses the `json_schema` response format with `strict`
+    enforcement, which mirrors what the Anthropic client gets from
+    `output_config.format`: the answer either validates against the citation
+    schema or the call fails loudly.
+
+    `reasoning_effort` is sent for the configured effort; if the target model
+    rejects the parameter (not every OpenAI model accepts it), the request is
+    retried once without it rather than failing the answer.
+    """
+
+    def __init__(self, default_model: str = "gpt-5.6-sol", api_key: str | None = None) -> None:
+        self._default_model = default_model
+        self._api_key = api_key
+        self._client: Any | None = None
+
+    @property
+    def name(self) -> str:
+        return f"openai:{self._default_model}"
+
+    def _load(self) -> Any:
+        if self._client is not None:
+            return self._client
+        try:
+            from openai import OpenAI
+        except ImportError as exc:  # pragma: no cover - install-dependent
+            raise LlmError("the `openai` package is required for OpenAiClient") from exc
+        # No api_key argument when unset: the SDK resolves OPENAI_API_KEY itself.
+        self._client = OpenAI(api_key=self._api_key) if self._api_key else OpenAI()
+        return self._client
+
+    def complete(self, request: LlmRequest) -> LlmResponse:
+        client = self._load()
+        model = request.model or self._default_model
+
+        messages: list[dict[str, str]] = []
+        if request.system:
+            messages.append({"role": "system", "content": request.system})
+        messages.append({"role": "user", "content": request.prompt})
+
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_completion_tokens": request.max_tokens,
+            "reasoning_effort": _OPENAI_EFFORT.get(request.effort, "high"),
+        }
+        if request.schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": dict(request.schema),
+                    "strict": True,
+                },
+            }
+
+        try:
+            completion = self._create(client, kwargs)
+        except LlmError:
+            raise
+        except Exception as exc:
+            raise LlmError(f"openai call failed: {exc}") from exc
+
+        return _from_openai(completion)
+
+    def _create(self, client: Any, kwargs: dict[str, Any]) -> Any:
+        """One create call, retrying once without `reasoning_effort` if rejected."""
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            message = str(exc)
+            if "reasoning_effort" in message and "reasoning_effort" in kwargs:
+                log.warning(
+                    "model rejected reasoning_effort; retrying without it",
+                    fields={"model": kwargs.get("model", "")},
+                )
+                retry_kwargs = {k: v for k, v in kwargs.items() if k != "reasoning_effort"}
+                return client.chat.completions.create(**retry_kwargs)
+            raise
+
+
+def _from_openai(completion: Any) -> LlmResponse:
+    choice = completion.choices[0] if getattr(completion, "choices", None) else None
+    if choice is None:
+        raise LlmError("openai returned no choices")
+
+    finish = str(getattr(choice, "finish_reason", "") or "stop")
+    # Map OpenAI finish reasons onto our stop vocabulary so the answerer's
+    # truncation and refusal handling works identically across providers.
+    stop_reason = {"stop": "end_turn", "length": "max_tokens", "content_filter": "refusal"}.get(
+        finish, "end_turn"
+    )
+
+    message = getattr(choice, "message", None)
+    refusal = getattr(message, "refusal", None) if message is not None else None
+    if refusal:
+        stop_reason = "refusal"
+    text = "" if stop_reason == "refusal" else str(getattr(message, "content", "") or "")
+
+    raw_usage = getattr(completion, "usage", None)
+    usage = Usage(
+        input_tokens=int(getattr(raw_usage, "prompt_tokens", 0) or 0),
+        output_tokens=int(getattr(raw_usage, "completion_tokens", 0) or 0),
+        llm_calls=1,
+    )
+    return LlmResponse(
+        text=text,
+        usage=usage,
+        model=str(getattr(completion, "model", "")),
+        stop_reason=stop_reason,
+        parsed=_maybe_json(text),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Ollama
 # --------------------------------------------------------------------------- #
 
@@ -318,7 +443,13 @@ def _maybe_json(text: str) -> Mapping[str, Any] | None:
 
 
 def build_client(
-    provider: str, *, model: str, ollama_model: str, ollama_host: str, api_key: str | None = None
+    provider: str,
+    *,
+    model: str,
+    ollama_model: str,
+    ollama_host: str,
+    api_key: str | None = None,
+    openai_api_key: str | None = None,
 ) -> LlmClient:
     if provider == "fake":
         # The fake is a test double; tests construct FakeLlmClient directly and
@@ -327,8 +458,10 @@ def build_client(
         # nothing, so it fails loudly instead.
         raise ConfigError(
             "generate.provider='fake' is test-only; tests construct FakeLlmClient "
-            "directly. Set provider to 'anthropic' or 'ollama'."
+            "directly. Set provider to 'openai', 'anthropic' or 'ollama'."
         )
+    if provider == "openai":
+        return OpenAiClient(default_model=model, api_key=openai_api_key)
     if provider == "ollama":
         return OllamaClient(model=ollama_model, host=ollama_host)
     return AnthropicClient(default_model=model, api_key=api_key)

@@ -1,9 +1,13 @@
 """The corpus manifest.
 
-PDFs are never committed. `corpus.yaml` records what the corpus *is* (id, title,
-source URL, licence, expected digest) and the fetcher materialises it on demand.
-That keeps the repo small, keeps licensing honest, and makes the corpus a reviewable
-diff rather than a directory of binaries.
+Documents are never committed. `corpus.yaml` records what the corpus *is* (id,
+title, source URL, licence, expected digest) and the fetcher materialises it on
+demand. That keeps the repo small, keeps licensing honest, and makes the corpus a
+reviewable diff rather than a directory of binaries.
+
+Two kinds of document share the manifest: arXiv PDFs, fetched over HTTP, and HTML
+blog snapshots, placed on disk by a human because the publishers block automated
+fetching. Both are pinned by sha256, so either kind drifting fails loudly.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal, cast, get_args
 
 import yaml
 
@@ -19,6 +24,9 @@ from rag.errors import ManifestError
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+PaperKind = Literal["pdf", "html"]
+_KINDS: frozenset[str] = frozenset(get_args(PaperKind))
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,13 +38,15 @@ class Paper:
     url: str
     topic: str
     license: str
+    kind: PaperKind = "pdf"
     arxiv_id: str | None = None
     sha256: str | None = None  # None until first fetch pins it
     notes: str = ""
 
     @property
     def filename(self) -> str:
-        return f"{self.id}.pdf"
+        """On-disk name of the fetched document; the extension follows the kind."""
+        return f"{self.id}.html" if self.kind == "html" else f"{self.id}.pdf"
 
     def with_digest(self, digest: str) -> Paper:
         return replace(self, sha256=digest)
@@ -139,6 +149,10 @@ def _parse_paper(entry: object, *, index: int, seen_ids: set[str]) -> Paper:
     if not url.startswith("https://"):
         raise ManifestError(f"{where}: url must be https, got {url!r}")
 
+    raw_kind = str(entry.get("kind") or "pdf")
+    if raw_kind not in _KINDS:
+        raise ManifestError(f"{where}: kind must be one of {sorted(_KINDS)}, got {raw_kind!r}")
+
     digest = entry.get("sha256")
     if digest is not None:
         digest = str(digest).lower()
@@ -151,6 +165,7 @@ def _parse_paper(entry: object, *, index: int, seen_ids: set[str]) -> Paper:
         url=url,
         topic=str(entry["topic"]),
         license=str(entry["license"]),
+        kind=cast(PaperKind, raw_kind),  # narrowed by the membership check above
         arxiv_id=str(entry["arxiv_id"]) if entry.get("arxiv_id") else None,
         sha256=digest,
         notes=str(entry.get("notes", "")),
@@ -172,6 +187,9 @@ def save_manifest(manifest: Manifest, path: Path | str) -> None:
                 for k, v in (
                     ("id", p.id),
                     ("title", p.title),
+                    # "pdf" is the default and is omitted, so the existing arXiv
+                    # entries round-trip without a corpus-wide diff.
+                    ("kind", p.kind if p.kind != "pdf" else None),
                     ("arxiv_id", p.arxiv_id),
                     ("topic", p.topic),
                     ("url", p.url),

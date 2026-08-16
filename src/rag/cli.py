@@ -208,6 +208,9 @@ def run_eval(
             ollama_model=config.generate.ollama_model,
             ollama_host=config.generate.ollama_host,
             api_key=api_key,
+            openai_api_key=(
+                secrets.openai_api_key.get_secret_value() if secrets.openai_api_key else None
+            ),
         )
         judge_obj = Judge(
             judge_client, model=config.eval.judge_model, effort=config.eval.judge_effort
