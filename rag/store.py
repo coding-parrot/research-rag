@@ -40,8 +40,13 @@ def load() -> tuple[faiss.Index, list[Chunk]]:
     return index, chunks
 
 
-def search(index: faiss.Index, chunks: list[Chunk], question: str, k: int = 4) -> list[tuple[Chunk, float]]:
-    """The whole of retrieval: embed the question, take the k nearest chunks."""
+def search(index: faiss.Index, chunks: list[Chunk], question: str, k: int = 8) -> list[tuple[Chunk, float]]:
+    """The whole of retrieval: embed the question, take the k nearest chunks.
+
+    k grows with the corpus: at ~1000 chunks top-4 was enough, at ~5000 the right
+    chunk competes with near-neighbours from related papers (Mamba vs Mamba-2 vs
+    RWKV), so we retrieve wider and let the model pick its evidence.
+    """
     query = embed([question])
     scores, ids = index.search(query, k)
     return [(chunks[i], float(s)) for s, i in zip(scores[0], ids[0]) if i != -1]

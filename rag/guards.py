@@ -1,14 +1,9 @@
-"""Guardrails: the three checks between a question and a shipped answer.
-
+"""
 Each guard runs on every request and answers one question:
   1. check_question   - should this reach the pipeline at all?
   2. check_retrieval  - did we find evidence good enough to answer from?
   3. check_citations  - is every claimed quote really in the chunk it cites?
 
-The third one is the heart of the system. The model must cite chunk ids and
-verbatim quotes; we verify each quote mechanically against the chunk text. A
-citation that fails the check is dropped, and an answer with no surviving
-citations is refused. Hallucinated evidence cannot ship.
 """
 
 import re
@@ -22,7 +17,7 @@ INJECTION = re.compile(
     re.I,
 )
 
-MIN_SCORE = 0.25  # cosine similarity below this means "nothing relevant exists"
+MIN_SCORE = 0.10  # cosine similarity below this means "nothing relevant exists"
 
 
 def check_question(question: str) -> str | None:

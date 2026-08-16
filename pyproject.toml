@@ -4,8 +4,7 @@ version = "1.0.0"
 description = "A RAG chatbot over ML papers, written to be read"
 requires-python = ">=3.12"
 dependencies = [
-    "pypdfium2",
-    "sentence-transformers",
+    "pymupdf",
     "faiss-cpu",
     "openai",
     "fastapi",

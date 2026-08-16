@@ -11,11 +11,11 @@ verify (see guards.check_citations) - not as prose we would have to trust.
 """
 
 import json
-from pathlib import Path
 
 from openai import OpenAI
 
 from rag.chunk import Chunk
+from rag.embed import api_key
 
 MODEL = "gpt-5.6-sol"
 
@@ -51,19 +51,11 @@ SCHEMA = {
 _client = None
 
 
-def _api_key() -> str:
-    """OPENAI_API_KEY from the .env file next to the project."""
-    for line in (Path(__file__).parent.parent / ".env").read_text().splitlines():
-        if line.startswith("OPENAI_API_KEY="):
-            return line.split("=", 1)[1].strip()
-    raise RuntimeError("put OPENAI_API_KEY=... in .env")
-
-
 def generate(question: str, results: list[tuple["Chunk", float]]) -> dict:
     """Build the prompt from the retrieved chunks, get a structured answer back."""
     global _client
     if _client is None:
-        _client = OpenAI(api_key=_api_key())
+        _client = OpenAI(api_key=api_key())
 
     passages = "\n\n".join(
         f"[id: {chunk.id}] {chunk.title} - {chunk.section} (p.{chunk.page})\n{chunk.text}"

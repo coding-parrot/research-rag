@@ -1,4 +1,4 @@
-# The corpus: papers from the InterviewReady AI-engineering library.
+# The corpus: the InterviewReady AI-engineering library plus canonical papers.
 # Add a paper here, run `python ingest.py`, restart the app.
 
 - id: attention
@@ -8,40 +8,40 @@
   title: Neural Machine Translation of Rare Words with Subword Units
   url: https://arxiv.org/pdf/1508.07909
 - id: bert
-  title: "BERT: Pre-training of Deep Bidirectional Transformers"
+  title: 'BERT: Pre-training of Deep Bidirectional Transformers'
   url: https://arxiv.org/pdf/1810.04805
 - id: sentence_bert
-  title: "Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks"
+  title: 'Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks'
   url: https://arxiv.org/pdf/1908.10084
 - id: rope
-  title: "RoFormer: Enhanced Transformer with Rotary Position Embedding"
+  title: 'RoFormer: Enhanced Transformer with Rotary Position Embedding'
   url: https://arxiv.org/pdf/2104.09864
 - id: flash_attention
-  title: "FlashAttention: Fast and Memory-Efficient Exact Attention"
+  title: 'FlashAttention: Fast and Memory-Efficient Exact Attention'
   url: https://arxiv.org/pdf/2205.14135
 - id: mqa
-  title: "Fast Transformer Decoding: One Write-Head is All You Need"
+  title: 'Fast Transformer Decoding: One Write-Head is All You Need'
   url: https://arxiv.org/pdf/1911.02150
 - id: paged_attention
   title: Efficient Memory Management for LLM Serving with PagedAttention
   url: https://arxiv.org/pdf/2309.06180
 - id: switch_transformer
-  title: "Switch Transformers: Scaling to Trillion Parameter Models"
+  title: 'Switch Transformers: Scaling to Trillion Parameter Models'
   url: https://arxiv.org/pdf/2101.03961
 - id: mixtral
   title: Mixtral of Experts
   url: https://arxiv.org/pdf/2401.04088
 - id: lora
-  title: "LoRA: Low-Rank Adaptation of Large Language Models"
+  title: 'LoRA: Low-Rank Adaptation of Large Language Models'
   url: https://arxiv.org/pdf/2106.09685
 - id: qlora
-  title: "QLoRA: Efficient Finetuning of Quantized LLMs"
+  title: 'QLoRA: Efficient Finetuning of Quantized LLMs'
   url: https://arxiv.org/pdf/2305.14314
 - id: llm_int8
-  title: "LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale"
+  title: 'LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale'
   url: https://arxiv.org/pdf/2208.07339
 - id: mamba
-  title: "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
+  title: 'Mamba: Linear-Time Sequence Modeling with Selective State Spaces'
   url: https://arxiv.org/pdf/2312.00752
 - id: instructgpt
   title: Training language models to follow instructions with human feedback
@@ -50,7 +50,7 @@
   title: Chain-of-Thought Prompting Elicits Reasoning in Large Language Models
   url: https://arxiv.org/pdf/2201.11903
 - id: vit
-  title: "An Image is Worth 16x16 Words: Transformers for Image Recognition"
+  title: 'An Image is Worth 16x16 Words: Transformers for Image Recognition'
   url: https://arxiv.org/pdf/2010.11929
 - id: clip
   title: Learning Transferable Visual Models From Natural Language Supervision
@@ -64,3 +64,240 @@
 - id: meta_test_generation
   title: Automated Unit Test Improvement using Large Language Models at Meta
   url: https://arxiv.org/pdf/2402.09171
+- id: byte_latent_transformer_patches
+  title: 'Byte Latent Transformer: Patches Scale Better Than Tokens'
+  url: https://arxiv.org/pdf/2412.09871
+- id: imagebind_one_embedding_space
+  title: 'ImageBind: One Embedding Space To Bind Them All'
+  url: https://arxiv.org/pdf/2305.05665
+- id: sonar_sentence_level_multimodal
+  title: 'SONAR: Sentence-Level Multimodal and Language-Agnostic Representations'
+  url: https://arxiv.org/pdf/2308.11466
+- id: the_faiss_library
+  title: The FAISS Library
+  url: https://arxiv.org/pdf/2401.08281
+- id: large_concept_models_language
+  title: 'Large Concept Models: Language Modeling in a Sentence Representation Space'
+  url: https://arxiv.org/pdf/2412.08821
+- id: tensorflow_a_system_for
+  title: 'TensorFlow: A System for Large-Scale Machine Learning'
+  url: https://arxiv.org/pdf/1605.08695
+- id: billion_scale_similarity_search
+  title: Billion-Scale Similarity Search with GPUs (FAISS)
+  url: https://arxiv.org/pdf/1702.08734
+- id: ray_a_distributed_framework
+  title: 'Ray: A Distributed Framework for Emerging AI Applications'
+  url: https://arxiv.org/pdf/1712.05889
+- id: gqa_training_generalized_multi
+  title: 'GQA: Training Generalized Multi-Query Transformer Models'
+  url: https://arxiv.org/pdf/2305.13245
+- id: titans_learning_to_memorize
+  title: 'Titans: Learning to Memorize at Test Time'
+  url: https://arxiv.org/pdf/2501.00663
+- id: videorope_what_makes_for
+  title: 'VideoRoPE: What Makes for Good Video Rotary Position Embedding?'
+  url: https://arxiv.org/pdf/2502.05173
+- id: outrageously_large_neural_networks
+  title: 'Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer'
+  url: https://arxiv.org/pdf/1701.06538
+- id: gshard_scaling_giant_models
+  title: 'GShard: Scaling Giant Models with Conditional Computation'
+  url: https://arxiv.org/pdf/2006.16668
+- id: deep_reinforcement_learning_from
+  title: Deep Reinforcement Learning from Human Preferences
+  url: https://arxiv.org/pdf/1706.03741
+- id: fine_tuning_language_models
+  title: Fine-Tuning Language Models from Human Preferences
+  url: https://arxiv.org/pdf/1909.08593
+- id: marco_o1_towards_open
+  title: 'Marco-o1: Towards Open Reasoning Models for Open-Ended Solutions'
+  url: https://arxiv.org/pdf/2411.14405
+- id: demystifying_long_chain_of
+  title: Demystifying Long Chain-of-Thought Reasoning in LLMs
+  url: https://arxiv.org/pdf/2502.03373
+- id: faith_and_fate_transformer
+  title: 'Faith and Fate: Transformer Reasoning Capabilities'
+  url: https://arxiv.org/pdf/2405.18512
+- id: large_language_monkeys_scaling
+  title: 'Large Language Monkeys: Scaling Inference Compute with Repeated Sampling'
+  url: https://arxiv.org/pdf/2407.21787
+- id: scaling_llm_test_time
+  title: Scaling LLM Test-Time Compute Optimally Can Be More Effective than Scaling Parameters
+  url: https://arxiv.org/pdf/2408.03314
+- id: training_large_language_models
+  title: Training Large Language Models to Reason in a Continuous Latent Space (Coconut)
+  url: https://arxiv.org/pdf/2412.06769
+- id: deepseek_r1_incentivizing_reasoning
+  title: 'DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning'
+  url: https://arxiv.org/pdf/2501.12948
+- id: a_probabilistic_inference_approach
+  title: A Probabilistic Inference Approach to Inference-Time Scaling of LLMs
+  url: https://arxiv.org/pdf/2502.01618
+- id: scaling_up_test_time
+  title: 'Scaling Up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach'
+  url: https://arxiv.org/pdf/2502.05171
+- id: syntactic_and_semantic_control
+  title: Syntactic and Semantic Control of LLMs via Sequential Monte Carlo
+  url: https://arxiv.org/pdf/2504.13139
+- id: the_era_of_1
+  title: 'The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits'
+  url: https://arxiv.org/pdf/2402.17764
+- id: flashattention_3_fast_and
+  title: 'FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-Precision'
+  url: https://arxiv.org/pdf/2407.08608
+- id: 1_58_bit_flux
+  title: 1.58-bit FLUX (ByteDance)
+  url: https://arxiv.org/pdf/2412.18653
+- id: transformer_2_self_adaptive
+  title: 'Transformer^2: Self-Adaptive LLMs'
+  url: https://arxiv.org/pdf/2501.06252
+- id: inference_time_scaling_for
+  title: Inference-Time Scaling for Diffusion Models beyond Scaling Denoising Steps
+  url: https://arxiv.org/pdf/2501.09732
+- id: can_1b_llm_surpass
+  title: Can 1B LLM Surpass 405B LLM? Rethinking Compute-Optimal Test-Time Scaling
+  url: https://arxiv.org/pdf/2502.06703
+- id: fast_inference_from_transformers
+  title: Fast Inference from Transformers via Speculative Decoding
+  url: https://arxiv.org/pdf/2211.17192
+- id: bootstrap_your_own_latent
+  title: 'Bootstrap Your Own Latent (BYOL): Self-Supervised Learning'
+  url: https://arxiv.org/pdf/2006.07733
+- id: emerging_properties_in_self
+  title: Emerging Properties in Self-Supervised Vision Transformers (DINO)
+  url: https://arxiv.org/pdf/2104.14294
+- id: rwkv_reinventing_rnns_for
+  title: 'RWKV: Reinventing RNNs for the Transformer Era'
+  url: https://arxiv.org/pdf/2305.13048
+- id: transformers_are_ssms_structured
+  title: 'Transformers are SSMs: Structured State Space Duality (Mamba-2)'
+  url: https://arxiv.org/pdf/2405.21060
+- id: the_mamba_in_the
+  title: 'The Mamba in the Llama: Distilling and Accelerating Hybrid Models'
+  url: https://arxiv.org/pdf/2408.10189
+- id: lolcats_on_low_rank
+  title: 'LoLCATs: On Low-Rank Linearizing of Large Language Models'
+  url: https://arxiv.org/pdf/2410.10254
+- id: think_slow_fast_scaling
+  title: 'Think Slow, Fast: Scaling Inference Compute with Distilled Reasoners'
+  url: https://arxiv.org/pdf/2502.20339
+- id: gold_medalist_performance_in
+  title: Gold-Medalist Performance in Solving Olympiad Geometry (AlphaGeometry2)
+  url: https://arxiv.org/pdf/2502.03544
+- id: competitive_programming_with_large
+  title: Competitive Programming with Large Reasoning Models
+  url: https://arxiv.org/pdf/2502.06807
+- id: towards_system_2_reasoning
+  title: 'Towards System 2 Reasoning in LLMs: Learning How to Think with Meta CoT'
+  url: https://arxiv.org/pdf/2501.04682
+- id: evolving_deeper_llm_thinking
+  title: Evolving Deeper LLM Thinking (Mind Evolution)
+  url: https://arxiv.org/pdf/2501.09891
+- id: llms_can_easily_learn
+  title: LLMs Can Easily Learn to Reason from Demonstrations
+  url: https://arxiv.org/pdf/2502.07374
+- id: dissociating_language_and_thought
+  title: Dissociating Language and Thought in Large Language Models
+  url: https://arxiv.org/pdf/2301.06627
+- id: janus_pro_unified_multimodal
+  title: 'Janus-Pro: Unified Multimodal Understanding and Generation (DeepSeek)'
+  url: https://arxiv.org/pdf/2501.17811
+- id: vivit_a_video_vision
+  title: 'ViViT: A Video Vision Transformer'
+  url: https://arxiv.org/pdf/2103.15691
+- id: revisiting_feature_prediction_for
+  title: Revisiting Feature Prediction for Learning Visual Representations from Video (V-JEPA)
+  url: https://arxiv.org/pdf/2404.08471
+- id: videojam_joint_appearance_motion
+  title: 'VideoJAM: Joint Appearance-Motion Representations for Video Generation'
+  url: https://arxiv.org/pdf/2502.02492
+- id: dspy_compiling_declarative_language
+  title: 'DSPy: Compiling Declarative Language Model Calls into Self-Improving Pipelines'
+  url: https://arxiv.org/pdf/2310.03714
+- id: retrieval_augmented_generation_with
+  title: Retrieval-Augmented Generation with Knowledge Graphs for Customer Service QA
+  url: https://arxiv.org/pdf/2404.17723
+- id: openai_o1_system_card
+  title: OpenAI o1 System Card
+  url: https://arxiv.org/pdf/2412.16720
+- id: automated_bug_catching_llm
+  title: 'Automated Bug Catching: LLM-Powered Mutation Testing at Meta'
+  url: https://arxiv.org/pdf/2501.12862
+- id: chain_of_retrieval_augmented
+  title: Chain-of-Retrieval Augmented Generation
+  url: https://arxiv.org/pdf/2501.14342
+- id: gpt3
+  title: Language Models are Few-Shot Learners (GPT-3)
+  url: https://arxiv.org/pdf/2005.14165
+- id: scaling_laws
+  title: Scaling Laws for Neural Language Models
+  url: https://arxiv.org/pdf/2001.08361
+- id: chinchilla
+  title: Training Compute-Optimal Large Language Models (Chinchilla)
+  url: https://arxiv.org/pdf/2203.15556
+- id: t5
+  title: Exploring the Limits of Transfer Learning with T5
+  url: https://arxiv.org/pdf/1910.10683
+- id: llama
+  title: 'LLaMA: Open and Efficient Foundation Language Models'
+  url: https://arxiv.org/pdf/2302.13971
+- id: llama2
+  title: 'Llama 2: Open Foundation and Fine-Tuned Chat Models'
+  url: https://arxiv.org/pdf/2307.09288
+- id: mistral
+  title: Mistral 7B
+  url: https://arxiv.org/pdf/2310.06825
+- id: gpt4
+  title: GPT-4 Technical Report
+  url: https://arxiv.org/pdf/2303.08774
+- id: dpo
+  title: Direct Preference Optimization
+  url: https://arxiv.org/pdf/2305.18290
+- id: constitutional_ai
+  title: 'Constitutional AI: Harmlessness from AI Feedback'
+  url: https://arxiv.org/pdf/2212.08073
+- id: ppo
+  title: Proximal Policy Optimization Algorithms
+  url: https://arxiv.org/pdf/1707.06347
+- id: self_consistency
+  title: Self-Consistency Improves Chain of Thought Reasoning
+  url: https://arxiv.org/pdf/2203.11171
+- id: zero_shot_cot
+  title: Large Language Models are Zero-Shot Reasoners
+  url: https://arxiv.org/pdf/2205.11916
+- id: tree_of_thoughts
+  title: 'Tree of Thoughts: Deliberate Problem Solving with LLMs'
+  url: https://arxiv.org/pdf/2305.10601
+- id: react
+  title: 'ReAct: Synergizing Reasoning and Acting in Language Models'
+  url: https://arxiv.org/pdf/2210.03629
+- id: toolformer
+  title: 'Toolformer: Language Models Can Teach Themselves to Use Tools'
+  url: https://arxiv.org/pdf/2302.04761
+- id: dpr
+  title: Dense Passage Retrieval for Open-Domain Question Answering
+  url: https://arxiv.org/pdf/2004.04906
+- id: realm
+  title: 'REALM: Retrieval-Augmented Language Model Pre-Training'
+  url: https://arxiv.org/pdf/2002.08909
+- id: colbert
+  title: 'ColBERT: Efficient Passage Search via Late Interaction over BERT'
+  url: https://arxiv.org/pdf/2004.12832
+- id: contriever
+  title: Unsupervised Dense Information Retrieval with Contrastive Learning
+  url: https://arxiv.org/pdf/2112.09118
+- id: hyde
+  title: Precise Zero-Shot Dense Retrieval without Relevance Labels (HyDE)
+  url: https://arxiv.org/pdf/2212.10496
+- id: self_rag
+  title: 'Self-RAG: Learning to Retrieve, Generate, and Critique'
+  url: https://arxiv.org/pdf/2310.11511
+- id: lost_in_middle
+  title: 'Lost in the Middle: How Language Models Use Long Contexts'
+  url: https://arxiv.org/pdf/2307.03172
+- id: gptq
+  title: 'GPTQ: Accurate Post-Training Quantization for Generative Transformers'
+  url: https://arxiv.org/pdf/2210.17323
+- id: flash_attention2
+  title: 'FlashAttention-2: Faster Attention with Better Parallelism'
+  url: https://arxiv.org/pdf/2307.08691
